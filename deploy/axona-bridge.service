@@ -13,7 +13,7 @@
 
 [Unit]
 Description=Axona Bridge — Phase 1 WebSocket server
-Documentation=https://github.com/axona-net/axona-bridge
+Documentation=https://github.com/axona/axona-bridge
 After=network-online.target
 Wants=network-online.target
 

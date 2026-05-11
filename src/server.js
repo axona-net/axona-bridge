@@ -1,33 +1,52 @@
 // =====================================================================
-// Axona Bridge — Phase 1
+// Axona Bridge — Phase 2
 //
-// A WebSocket server that accepts connections from axona-peer browser
-// clients, echoes their ping messages as pongs, and exposes a small
-// JSON health endpoint over HTTP.
+// A WebSocket server that brokers introductions between axona-peer
+// browser clients.  In Phase 1 the bridge only echoed pings back; in
+// Phase 2 it adds the signaling-server role that lets peers discover
+// each other and set up WebRTC DataChannels for direct peer-to-peer
+// communication.  The bridge is still a participant (peers ping it
+// directly, it pongs back), but the peer-to-peer ping/pong traffic
+// flows over WebRTC, not through here.
 //
-// The bridge does not yet speak the Axona protocol; this layer exists
-// only to prove the wire works (browser ↔ Node over wss://) before
-// any DHT-level concerns land.
+// The bridge does not yet speak the Axona protocol.  Phase 3 will
+// drop the protocol on top of the same transport seams.
 //
 // Configuration via env vars (see .env.example):
 //   PORT       — TCP port to listen on (default 8080)
 //   LOG_LEVEL  — 'info' | 'debug' (default 'info'; debug logs every msg)
 //
-// Wire format (Phase 1):
-//   client → server : { type: 'ping', t: <client epoch ms> }
-//   server → client : { type: 'welcome', connId, serverT }   (on connect)
-//                     { type: 'pong', t: <echoed>, serverT } (per ping)
+// ── Wire format (Phase 2) ────────────────────────────────────────────
+//
+//   client → bridge:
+//     { type: 'ping',   t: <client epoch ms> }
+//     { type: 'signal', to: <peerId>, payload: <opaque-SDP-or-ICE> }
+//
+//   bridge → client (own connection):
+//     { type: 'welcome',    connId, serverT }          (once on connect)
+//     { type: 'peer-list',  peers:  [<peerId>, ...] }  (once on connect)
+//     { type: 'pong',       t: <echoed>, serverT }     (per ping)
+//     { type: 'signal',     from: <peerId>, payload }  (relayed from peer)
+//
+//   bridge → all other clients (broadcast):
+//     { type: 'peer-joined', peerId, serverT }         (when someone joins)
+//     { type: 'peer-left',   peerId, serverT }         (when someone leaves)
+//
+// The `signal` payload is opaque to the bridge — it's the bytes that
+// the WebRTC negotiation needs to cross, and the bridge's only job is
+// to put a `from` field on it and forward to `to`.
 // =====================================================================
 
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
+const VERSION   = '0.2.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const startTs   = Date.now();
 
 let connSeq = 0;
-/** @type {Map<string, {ws: WebSocket, ip: string, since: number, pings: number, pongs: number, ua: string}>} */
+/** @type {Map<string, {ws: any, ip: string, since: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
 const connections = new Map();
 
 // ── Structured JSON logging ──────────────────────────────────────────
@@ -57,6 +76,34 @@ function logDebug(event, extra = {}) {
   }) + '\n');
 }
 
+// ── Send helpers ─────────────────────────────────────────────────────
+function sendTo(peerId, msg) {
+  const conn = connections.get(peerId);
+  if (!conn) return false;
+  try {
+    conn.ws.send(JSON.stringify(msg));
+    return true;
+  } catch (err) {
+    logErr('send-failed', { connId: peerId, type: msg.type, err: err.message });
+    return false;
+  }
+}
+
+/** Broadcast to every peer except `exceptId` (typically the originator). */
+function broadcast(msg, exceptId = null) {
+  let count = 0;
+  for (const [id, conn] of connections) {
+    if (id === exceptId) continue;
+    try {
+      conn.ws.send(JSON.stringify(msg));
+      count++;
+    } catch (err) {
+      logErr('broadcast-send-failed', { connId: id, type: msg.type, err: err.message });
+    }
+  }
+  return count;
+}
+
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') {
@@ -64,19 +111,19 @@ const httpServer = http.createServer((req, res) => {
       status:      'ok',
       connections: connections.size,
       uptimeS:     Math.floor((Date.now() - startTs) / 1000),
-      version:     '0.1.0',
+      version:     VERSION,
     });
     res.writeHead(200, {
-      'Content-Type':  'application/json',
+      'Content-Type':   'application/json',
       'Content-Length': Buffer.byteLength(body),
-      'Cache-Control': 'no-store',
+      'Cache-Control':  'no-store',
     });
     res.end(body);
     return;
   }
   if (req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('axona-bridge\n');
+    res.end(`axona-bridge ${VERSION}\n`);
     return;
   }
   res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -94,21 +141,35 @@ wss.on('connection', (ws, req) => {
   const ua = req.headers['user-agent'] ?? '';
   const since = Date.now();
 
-  const conn = { ws, ip, since, pings: 0, pongs: 0, ua };
+  // Snapshot the *existing* peer set BEFORE adding the new one — this
+  // is what we'll send back as `peer-list`.  If we registered first,
+  // the new peer would see itself in its own list.
+  const existingPeers = [...connections.keys()];
+
+  const conn = {
+    ws, ip, since,
+    pings: 0, pongs: 0, signalsRelayed: 0,
+    ua,
+  };
   connections.set(id, conn);
 
   log('connect', { connId: id, ip, total: connections.size, ua: ua.slice(0, 80) });
 
-  // Welcome the client with its assigned id and server time.
-  try {
-    ws.send(JSON.stringify({
-      type:    'welcome',
-      connId:  id,
-      serverT: Date.now(),
-    }));
-  } catch (err) {
-    logErr('welcome-send-failed', { connId: id, err: err.message });
-  }
+  // 1. Welcome the new peer with its assigned id.
+  sendTo(id, { type: 'welcome', connId: id, serverT: Date.now(), version: VERSION });
+
+  // 2. Tell the new peer about everyone who was already here.
+  //    The new peer is the *initiator* in WebRTC negotiation — it will
+  //    send offers to each of these existing peers.
+  sendTo(id, { type: 'peer-list', peers: existingPeers, serverT: Date.now() });
+
+  // 3. Tell all existing peers that someone new arrived.  They will
+  //    wait for the new peer to initiate.
+  const announcedTo = broadcast(
+    { type: 'peer-joined', peerId: id, serverT: Date.now() },
+    id,
+  );
+  log('peer-announce', { connId: id, peers: existingPeers.length, announcedTo });
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
@@ -139,6 +200,36 @@ wss.on('connection', (ws, req) => {
         }
         break;
       }
+
+      case 'signal': {
+        // Relay opaque SDP / ICE between peers.  The bridge does not
+        // inspect `payload` — it only validates that `to` is connected
+        // and rewrites the addressing so the recipient knows who sent it.
+        const to = msg.to;
+        if (typeof to !== 'string') {
+          logErr('signal-missing-to', { connId: id });
+          break;
+        }
+        if (!connections.has(to)) {
+          // Recipient is gone — silently drop.  This is a normal race:
+          // a peer-left event raced past the signaling message.  We
+          // don't surface an error to the sender because the sender
+          // will receive `peer-left` and clean up on its own.
+          logDebug('signal-drop-unknown-to', { connId: id, to });
+          break;
+        }
+        const delivered = sendTo(to, {
+          type:    'signal',
+          from:    id,
+          payload: msg.payload,
+        });
+        if (delivered) {
+          conn.signalsRelayed++;
+          logDebug('signal-relay', { from: id, to, n: conn.signalsRelayed });
+        }
+        break;
+      }
+
       default:
         logDebug('unknown-type', { connId: id, type: msg.type });
     }
@@ -147,6 +238,14 @@ wss.on('connection', (ws, req) => {
   ws.on('close', (code, reason) => {
     const lifeS = Math.floor((Date.now() - since) / 1000);
     connections.delete(id);
+
+    // Tell everyone remaining that this peer is gone.  They'll tear
+    // down their RTCPeerConnection for this id.
+    const notifiedCount = broadcast(
+      { type: 'peer-left', peerId: id, serverT: Date.now() },
+      null,   // peer is already removed from the registry
+    );
+
     log('disconnect', {
       connId:    id,
       code,
@@ -154,6 +253,8 @@ wss.on('connection', (ws, req) => {
       lifeS,
       pings:     conn.pings,
       pongs:     conn.pongs,
+      signals:   conn.signalsRelayed,
+      notified:  notifiedCount,
       remaining: connections.size,
     });
   });
@@ -165,7 +266,7 @@ wss.on('connection', (ws, req) => {
 
 // ── Boot ─────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
-  log('listen', { port: PORT, logLevel: LOG_LEVEL });
+  log('listen', { port: PORT, logLevel: LOG_LEVEL, version: VERSION });
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────
