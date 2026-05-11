@@ -27,7 +27,7 @@ sudo chown -R axona:axona /opt/axona-bridge
 ```bash
 # As the axona user (or via sudo -u axona)
 cd /opt/axona-bridge
-sudo -u axona git clone https://github.com/axona/axona-bridge.git .
+sudo -u axona git clone https://github.com/axona-net/axona-bridge.git .
 sudo -u axona npm ci --omit=dev
 
 # Environment

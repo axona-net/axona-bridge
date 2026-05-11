@@ -13,7 +13,7 @@
 
 [Unit]
 Description=Axona Bridge — Phase 1 WebSocket server
-Documentation=https://github.com/axona/axona-bridge
+Documentation=https://github.com/axona-net/axona-bridge
 After=network-online.target
 Wants=network-online.target
 
@@ -40,7 +40,11 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute is NOT set — V8 (Node's JIT engine) needs to
+# allocate memory that's both writable and executable.  Setting this
+# to true causes Node to crash immediately at startup with a V8 fatal
+# error in OS::SetPermissions.  Trade-off: the bridge is a JIT-using
+# runtime, so this particular hardening doesn't apply.
 
 [Install]
 WantedBy=multi-user.target
