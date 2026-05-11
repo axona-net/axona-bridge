@@ -1,0 +1,46 @@
+# /etc/systemd/system/axona-bridge.service
+#
+# systemd unit for the Axona bridge.
+#
+# Install:
+#   sudo cp deploy/axona-bridge.service /etc/systemd/system/
+#   sudo cp .env.example /etc/axona-bridge.env  # edit as needed
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin axona
+#   sudo mkdir -p /opt/axona-bridge && sudo chown -R axona:axona /opt/axona-bridge
+#   (rsync or git clone the repo into /opt/axona-bridge, then `npm ci`)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now axona-bridge
+
+[Unit]
+Description=Axona Bridge — Phase 1 WebSocket server
+Documentation=https://github.com/axona-net/axona-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=axona
+Group=axona
+WorkingDirectory=/opt/axona-bridge
+EnvironmentFile=/etc/axona-bridge.env
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=axona-bridge
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

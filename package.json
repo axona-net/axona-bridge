@@ -1,0 +1,20 @@
+{
+  "name": "axona-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Axona Phase 1 — WebSocket bridge for peer ping/pong connectivity testing",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "smoke": "node scripts/smoke-client.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "license": "MIT"
+}
