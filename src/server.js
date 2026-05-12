@@ -38,12 +38,43 @@
 // =====================================================================
 
 import { WebSocketServer } from 'ws';
-import http from 'http';
+import crypto from 'crypto';
+import http   from 'http';
 
-const VERSION   = '0.3.0';
+const VERSION   = '0.4.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const startTs   = Date.now();
+
+// ── TURN credential minting ─────────────────────────────────────────
+//
+// We mint short-lived (username, credential) pairs for each connecting
+// peer using the scheme from draft-uberti-rtcweb-turn-rest, which is
+// what coturn's `use-auth-secret` mode validates against:
+//
+//   username   = "<expiry-unix-seconds>:<peerId>"
+//   credential = base64( HMAC-SHA1( secret, username ) )
+//
+// The secret is shared with coturn out-of-band (both read it from the
+// same value — coturn from its conf file, the bridge from this env
+// var).  Peers never see the secret; they get a derived credential
+// that expires in TURN_TTL_SECONDS.  This is what keeps the bridge
+// from baking long-term credentials into peer source.
+const TURN_AUTH_SECRET = process.env.TURN_AUTH_SECRET ?? null;
+const TURN_TTL_SECONDS = 60 * 60 * 2;   // 2h — longer than any realistic session
+const TURN_URLS        = (process.env.TURN_URLS ?? 'turn:turn.axona.net:3478,turns:turn.axona.net:5349')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+function makeTurnCredential(peerId) {
+  if (!TURN_AUTH_SECRET) return null;
+  const expiry   = Math.floor(Date.now() / 1000) + TURN_TTL_SECONDS;
+  const username = `${expiry}:${peerId}`;
+  const credential = crypto
+    .createHmac('sha1', TURN_AUTH_SECRET)
+    .update(username)
+    .digest('base64');
+  return { urls: TURN_URLS, username, credential, ttlSeconds: TURN_TTL_SECONDS };
+}
 
 // Idle-timeout sweep.  Peers ping at 1Hz; anything that's gone more
 // than IDLE_TIMEOUT_MS without sending us a single message is treated
@@ -166,8 +197,19 @@ wss.on('connection', (ws, req) => {
 
   log('connect', { connId: id, ip, total: connections.size, ua: ua.slice(0, 80) });
 
-  // 1. Welcome the new peer with its assigned id.
-  sendTo(id, { type: 'welcome', connId: id, serverT: Date.now(), version: VERSION });
+  // 1. Welcome the new peer with its assigned id and (if configured)
+  //    a fresh HMAC-signed TURN credential.  The credential travels
+  //    inside the welcome message so peer JS never has to ship a
+  //    long-term secret; expiry is 2h, much longer than any plausible
+  //    WebRTC session.
+  const turn = makeTurnCredential(id);
+  sendTo(id, {
+    type:    'welcome',
+    connId:  id,
+    serverT: Date.now(),
+    version: VERSION,
+    turn,
+  });
 
   // 2. Tell the new peer about everyone who was already here.
   //    The new peer is the *initiator* in WebRTC negotiation — it will
@@ -322,6 +364,9 @@ httpServer.listen(PORT, () => {
     version:               VERSION,
     idleTimeoutMs:         IDLE_TIMEOUT_MS,
     idleCheckIntervalMs:   IDLE_CHECK_INTERVAL_MS,
+    turnMinting:           TURN_AUTH_SECRET ? 'enabled' : 'disabled (no TURN_AUTH_SECRET)',
+    turnUrls:              TURN_AUTH_SECRET ? TURN_URLS : [],
+    turnTtlSeconds:        TURN_AUTH_SECRET ? TURN_TTL_SECONDS : 0,
   });
 });
 
