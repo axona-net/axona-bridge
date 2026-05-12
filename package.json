@@ -1,6 +1,6 @@
 {
   "name": "axona-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Axona Phase 2 — WebSocket bridge: ping/pong + WebRTC signaling relay for the peer mesh",
   "type": "module",

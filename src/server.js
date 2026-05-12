@@ -40,13 +40,23 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
 
-const VERSION   = '0.2.0';
+const VERSION   = '0.3.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const startTs   = Date.now();
 
+// Idle-timeout sweep.  Peers ping at 1Hz; anything that's gone more
+// than IDLE_TIMEOUT_MS without sending us a single message is treated
+// as dead and forcibly terminated.  This is what kills "ghost peers"
+// — connections where the underlying TCP socket dropped without a
+// WebSocket close frame, so the OS never told us the peer left.  Set
+// generously enough (15s = 15 missed pings) that brief network
+// hiccups don't false-positive.
+const IDLE_TIMEOUT_MS         = 15_000;
+const IDLE_CHECK_INTERVAL_MS  =  5_000;
+
 let connSeq = 0;
-/** @type {Map<string, {ws: any, ip: string, since: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
+/** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
 const connections = new Map();
 
 // ── Structured JSON logging ──────────────────────────────────────────
@@ -148,6 +158,7 @@ wss.on('connection', (ws, req) => {
 
   const conn = {
     ws, ip, since,
+    lastSeenAt: since,
     pings: 0, pongs: 0, signalsRelayed: 0,
     ua,
   };
@@ -172,6 +183,12 @@ wss.on('connection', (ws, req) => {
   log('peer-announce', { connId: id, peers: existingPeers.length, announcedTo });
 
   ws.on('message', (data, isBinary) => {
+    // Any inbound bytes — even a malformed payload — count as proof
+    // the peer is still alive.  Stamping liveness before parse means
+    // a peer that briefly sends junk doesn't get kicked for being
+    // idle on top of that.
+    conn.lastSeenAt = Date.now();
+
     if (isBinary) {
       logDebug('binary-dropped', { connId: id, bytes: data.length });
       return;
@@ -264,9 +281,48 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// ── Idle-timeout sweep ───────────────────────────────────────────────
+//
+// Scan every IDLE_CHECK_INTERVAL_MS for connections that haven't sent
+// us anything in IDLE_TIMEOUT_MS.  Forcibly terminate them.  This is
+// the cure for ghost peers: a peer whose underlying TCP socket gets
+// silently dropped (radio off mid-flight, OS kills backgrounded tab,
+// upstream router NATs out an idle binding) never sends a WebSocket
+// close frame, so without this sweep the connection sits in our map
+// forever and everyone else keeps trying to reach a corpse.
+//
+// terminate() rather than close() because close() blocks waiting for
+// the dead peer's close-frame reply, which by definition will never
+// arrive.  terminate() rips the socket and fires the 'close' event
+// with code 1006 — our existing close handler then broadcasts the
+// peer-left to the rest of the mesh.
+function sweepIdleConnections() {
+  const now = Date.now();
+  const toKick = [];
+  for (const [id, conn] of connections) {
+    const idleMs = now - conn.lastSeenAt;
+    if (idleMs > IDLE_TIMEOUT_MS) toKick.push({ id, conn, idleMs });
+  }
+  if (toKick.length === 0) return;
+  // Terminate after the iteration so the close-handler's
+  // connections.delete() doesn't mutate the map mid-walk.
+  for (const { id, conn, idleMs } of toKick) {
+    log('idle-kick', { connId: id, idleMs, lastPings: conn.pings });
+    try { conn.ws.terminate(); }
+    catch (err) { logErr('terminate-failed', { connId: id, err: err.message }); }
+  }
+}
+const idleSweepTimer = setInterval(sweepIdleConnections, IDLE_CHECK_INTERVAL_MS);
+
 // ── Boot ─────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
-  log('listen', { port: PORT, logLevel: LOG_LEVEL, version: VERSION });
+  log('listen', {
+    port:                  PORT,
+    logLevel:              LOG_LEVEL,
+    version:               VERSION,
+    idleTimeoutMs:         IDLE_TIMEOUT_MS,
+    idleCheckIntervalMs:   IDLE_CHECK_INTERVAL_MS,
+  });
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────
@@ -275,6 +331,7 @@ function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log('shutdown-begin', { signal, connections: connections.size });
+  clearInterval(idleSweepTimer);
 
   for (const [id, { ws }] of connections) {
     try { ws.close(1001, 'server shutting down'); }
