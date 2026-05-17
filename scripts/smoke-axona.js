@@ -62,6 +62,10 @@ async function waitForReady(check, timeoutMs = 3000) {
   }
 }
 
+// Smoke clients impersonate a compliant peer at PEER_VERSION_FOR_SMOKE.
+// Bump this if the bridge raises MIN_PEER_VERSION beyond it.
+const PEER_VERSION_FOR_SMOKE = '0.12.0';
+
 function openClient() {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(BRIDGE_URL);
@@ -82,7 +86,16 @@ function openClient() {
         buffered.push(msg);
       }
     });
-    ws.on('open', () => resolve(ws));
+    ws.on('open', () => {
+      // Bridge requires client-hello before sending welcome.  Pose as
+      // a compliant peer.
+      try {
+        ws.send(JSON.stringify({
+          type: 'client-hello', version: PEER_VERSION_FOR_SMOKE,
+        }));
+      } catch (err) { reject(err); return; }
+      resolve(ws);
+    });
     ws.on('error', reject);
   });
 }

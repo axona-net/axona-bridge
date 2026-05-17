@@ -44,9 +44,35 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.8.0';
+const VERSION   = '0.9.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
+
+// Version gate.  Browsers running an older peer can't be trusted to
+// participate in pub/sub (no mountPubsub handler → silently drops
+// 'pubsub:deliver' AND fails to forward, creating a black hole in the
+// gossip graph) or anything else we add to the wire protocol.  We
+// reject sub-minimum peers with a custom close code at handshake time
+// and the peer-side UI shows a "please reload" banner.
+//
+// Bump MIN_PEER_VERSION whenever a non-backwards-compatible wire
+// change ships in the peer.  Override via the environment when you
+// need to temporarily relax the gate (eg. emergency rollback).
+const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.12.0';
+const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
+const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
+
+/** Three-component numeric semver compare; returns true iff a >= b. */
+function gteVersion(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const ai = pa[i] ?? 0, bi = pb[i] ?? 0;
+    if (ai > bi) return true;
+    if (ai < bi) return false;
+  }
+  return true;
+}
 const startTs   = Date.now();
 
 // ── TURN credential minting ─────────────────────────────────────────
@@ -154,11 +180,15 @@ function sendTo(peerId, msg) {
   }
 }
 
-/** Broadcast to every peer except `exceptId` (typically the originator). */
+/** Broadcast to every peer except `exceptId` (typically the originator).
+ *  Skips connections that haven't completed the client-hello version
+ *  check — they should never appear in peer-list or get peer-joined
+ *  notifications. */
 function broadcast(msg, exceptId = null) {
   let count = 0;
   for (const [id, conn] of connections) {
-    if (id === exceptId) continue;
+    if (id === exceptId)  continue;
+    if (!conn.admitted)   continue;
     try {
       conn.ws.send(JSON.stringify(msg, bigintReplacer));
       count++;
@@ -189,11 +219,20 @@ log('axona-ready', {
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') {
+    // Count admitted vs pending so operators can see how many
+    // connections passed the version gate.
+    let admittedCount = 0, pendingCount = 0;
+    for (const c of connections.values()) {
+      if (c.admitted) admittedCount++; else pendingCount++;
+    }
     const body = JSON.stringify({
-      status:      'ok',
-      connections: connections.size,
-      uptimeS:     Math.floor((Date.now() - startTs) / 1000),
-      version:     VERSION,
+      status:         'ok',
+      connections:    connections.size,
+      admitted:       admittedCount,
+      pending:        pendingCount,
+      minPeerVersion: MIN_PEER_VERSION,
+      uptimeS:        Math.floor((Date.now() - startTs) / 1000),
+      version:        VERSION,
       axona: {
         nodeId:         idToHex(bridgeNode.nodeId),
         region:         bridgeNode.identity.region.label,
@@ -238,43 +277,74 @@ wss.on('connection', (ws, req) => {
     lastSeenAt: since,
     pings: 0, pongs: 0, signalsRelayed: 0,
     ua,
+    admitted: false,      // flipped to true after client-hello version check
+    helloTimer: null,
+    peerVersion: null,
   };
   connections.set(id, conn);
 
   log('connect', { connId: id, ip, total: connections.size, ua: ua.slice(0, 80) });
 
-  // 1. Welcome the new peer with its assigned id and (if configured)
-  //    a fresh HMAC-signed TURN credential.  The credential travels
-  //    inside the welcome message so peer JS never has to ship a
-  //    long-term secret; expiry is 2h, much longer than any plausible
-  //    WebRTC session.
-  const turn = makeTurnCredential(id);
+  // 1. Tell the peer the version gate exists *before* we close.  This
+  //    isn't a `welcome` — peer-list / peer-joined / hello are
+  //    deferred until client-hello passes.  The peer side sends
+  //    'client-hello' immediately after open; if nothing arrives
+  //    within HELLO_TIMEOUT_MS, we close with the upgrade-required
+  //    code so old clients trying to ride through get an obvious
+  //    failure mode instead of a silent ghost connection.
   sendTo(id, {
-    type:    'welcome',
-    connId:  id,
-    serverT: Date.now(),
-    version: VERSION,
-    turn,
+    type:           'version-gate',
+    minPeerVersion: MIN_PEER_VERSION,
+    serverT:        Date.now(),
   });
 
-  // 2. Tell the new peer about everyone who was already here.
-  //    The new peer is the *initiator* in WebRTC negotiation — it will
-  //    send offers to each of these existing peers.
-  sendTo(id, { type: 'peer-list', peers: existingPeers, serverT: Date.now() });
+  conn.helloTimer = setTimeout(() => {
+    if (conn.admitted) return;
+    logErr('client-hello-timeout', { connId: id, ms: HELLO_TIMEOUT_MS });
+    try {
+      ws.close(CLOSE_UPGRADE_REQUIRED,
+        `client-hello not received within ${HELLO_TIMEOUT_MS}ms; ` +
+        `min peer v${MIN_PEER_VERSION} required`);
+    } catch {}
+  }, HELLO_TIMEOUT_MS);
 
-  // 3. Tell all existing peers that someone new arrived.  They will
-  //    wait for the new peer to initiate.
-  const announcedTo = broadcast(
-    { type: 'peer-joined', peerId: id, serverT: Date.now() },
-    id,
-  );
-  log('peer-announce', { connId: id, peers: existingPeers.length, announcedTo });
+  function admitConnection() {
+    clearTimeout(conn.helloTimer);
+    conn.helloTimer = null;
+    conn.admitted = true;
 
-  // 4. Send the Axona bootstrap-offer (hello).  The new peer's
-  //    BridgeTransport will reply with hello-ack carrying its
-  //    Axona nodeId; that's when our bridge node admits this
-  //    browser into its synaptome.
-  bridgeNode.sendHello(id);
+    // 1a. Mint a short-lived TURN credential (2h expiry) bundled
+    //     into welcome so peer JS never sees a long-term secret.
+    const turn = makeTurnCredential(id);
+    sendTo(id, {
+      type:    'welcome',
+      connId:  id,
+      serverT: Date.now(),
+      version: VERSION,
+      turn,
+    });
+
+    // 2. Tell the new peer about everyone ALREADY admitted.
+    const admittedPeers = [];
+    for (const [otherId, otherConn] of connections) {
+      if (otherId === id) continue;
+      if (!otherConn.admitted) continue;
+      admittedPeers.push(otherId);
+    }
+    sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+
+    // 3. Tell existing admitted peers that someone new arrived.
+    const announcedTo = broadcast(
+      { type: 'peer-joined', peerId: id, serverT: Date.now() },
+      id,
+    );
+    log('peer-announce', { connId: id, peers: admittedPeers.length, announcedTo });
+
+    // 4. Axona bootstrap-offer.  The peer's BridgeTransport replies
+    //    with hello-ack carrying its nodeId; that's when our bridge
+    //    node admits this browser into its synaptome.
+    bridgeNode.sendHello(id);
+  }
 
   ws.on('message', (data, isBinary) => {
     // Any inbound bytes — even a malformed payload — count as proof
@@ -292,6 +362,42 @@ wss.on('connection', (ws, req) => {
       msg = JSON.parse(data.toString(), bigintReviver);
     } catch (err) {
       logErr('bad-json', { connId: id, err: err.message });
+      return;
+    }
+
+    // Version gate.  Before client-hello passes, the ONLY message we
+    // accept is client-hello itself.  Everything else (ping, signal,
+    // axona, etc.) is silently dropped so we don't leak state — and
+    // never relay axona-protocol frames from un-validated peers.
+    if (!conn.admitted) {
+      if (msg.type !== 'client-hello') {
+        logDebug('pre-hello-message-dropped', { connId: id, type: msg.type });
+        return;
+      }
+      const peerVersion = typeof msg.version === 'string' ? msg.version : null;
+      conn.peerVersion = peerVersion;
+      if (!peerVersion) {
+        logErr('client-hello-missing-version', { connId: id });
+        try {
+          ws.close(CLOSE_UPGRADE_REQUIRED,
+            `client-hello must include 'version' (min v${MIN_PEER_VERSION})`);
+        } catch {}
+        return;
+      }
+      if (!gteVersion(peerVersion, MIN_PEER_VERSION)) {
+        logErr('client-hello-too-old', {
+          connId: id, peerVersion, minPeerVersion: MIN_PEER_VERSION,
+        });
+        try {
+          ws.close(CLOSE_UPGRADE_REQUIRED,
+            `peer v${peerVersion} below minimum v${MIN_PEER_VERSION}`);
+        } catch {}
+        return;
+      }
+      log('client-hello-admitted', {
+        connId: id, peerVersion, minPeerVersion: MIN_PEER_VERSION,
+      });
+      admitConnection();
       return;
     }
 
@@ -358,6 +464,10 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     const lifeS = Math.floor((Date.now() - since) / 1000);
+    if (conn.helloTimer) {
+      clearTimeout(conn.helloTimer);
+      conn.helloTimer = null;
+    }
     connections.delete(id);
 
     // Let the embedded Axona node clean up its bindings + reject any
