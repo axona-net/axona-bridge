@@ -33,6 +33,7 @@ import {
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
+import { mountPubsub }        from './pubsub.js';
 
 export class BridgeAxonaNode {
   /**
@@ -96,6 +97,12 @@ export class BridgeAxonaNode {
     await this._transport.start(this._identity.id);
 
     this._registerNH1Handlers();
+
+    // Application-layer pub/sub.  The bridge participates as a normal
+    // node — it forwards 'pubsub:deliver' frames between browsers but
+    // doesn't currently subscribe to anything itself.  Mounted after
+    // NH-1 handlers so dedup state is in place.
+    this._pubsub = mountPubsub(this._node, this._transport, { log: this._log });
 
     this._peer = new AxonaPeer({ engine: this._engine, node: this._node });
     await this._peer.start();
