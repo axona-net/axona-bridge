@@ -146,7 +146,14 @@ export class WebSocketTransport extends Transport {
   async notify(nodeId, type, body) {
     if (!this._started) throw new Error('WebSocketTransport.notify: not started');
     const connId = this._connIdByNodeId.get(nodeId);
-    if (!connId || !this._isConnOpen(connId)) return;
+    if (!connId) {
+      this._log('ws-notify-no-binding', { nodeId: nodeId.toString(16), type });
+      return;
+    }
+    if (!this._isConnOpen(connId)) {
+      this._log('ws-notify-conn-closed', { nodeId: nodeId.toString(16), connId, type });
+      return;
+    }
     try {
       this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type, body } });
     } catch (err) {
