@@ -38,6 +38,8 @@ function startBridge() {
       PORT: String(BRIDGE_PORT),
       BRIDGE_IDENTITY_PATH: identityPath,
       LOG_LEVEL: 'info',
+      // Pin the gate to the version the smoke client sends.
+      MIN_PEER_VERSION: PEER_VERSION_FOR_SMOKE,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
