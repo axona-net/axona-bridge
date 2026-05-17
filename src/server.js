@@ -58,7 +58,11 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // Bump MIN_PEER_VERSION whenever a non-backwards-compatible wire
 // change ships in the peer.  Override via the environment when you
 // need to temporarily relax the gate (eg. emergency rollback).
-const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.12.0';
+// 0.13.0 is the first peer build that sends the client-hello frame.
+// Lower values can never admit (they always hit the hello timeout) —
+// keep this in sync with the version that introduced client-hello on
+// the peer side.
+const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.13.0';
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
