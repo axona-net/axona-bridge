@@ -33,7 +33,7 @@ import {
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
-import { mountPubsub }        from './pubsub.js';
+import { mountAxonalPubsub }  from './pubsub_axonal.js';
 
 export class BridgeAxonaNode {
   /**
@@ -98,14 +98,23 @@ export class BridgeAxonaNode {
 
     this._registerNH1Handlers();
 
-    // Application-layer pub/sub.  The bridge participates as a normal
-    // node — it forwards 'pubsub:deliver' frames between browsers but
-    // doesn't currently subscribe to anything itself.  Mounted after
-    // NH-1 handlers so dedup state is in place.
-    this._pubsub = mountPubsub(this._node, this._transport, { log: this._log });
-
     this._peer = new AxonaPeer({ engine: this._engine, node: this._node });
     await this._peer.start();
+
+    // Real DHT-based pub/sub.  Bridge participates as a normal DHT
+    // peer — when its nodeId is among the K-closest to a topic, it
+    // becomes that topic's axon and forwards via sendDirect to
+    // subscribers; otherwise it's just a routing hop.  No more
+    // application-layer flood forwarding.
+    this._engine.setPeerForNode(this._node, this._peer);
+    this._axon = this._engine.axonFor(this._node);
+    this._pubsub = mountAxonalPubsub({
+      axon: this._axon,
+      peer: this._peer,
+      log:  this._log,
+    });
+
+    this._registerRouteMsgHandler();
 
     return this;
   }
@@ -303,6 +312,17 @@ export class BridgeAxonaNode {
     if (!node._deadPeers) node._deadPeers = new Set();
     t.onPeerDied((deadId) => {
       if (typeof deadId === 'bigint') node._deadPeers.add(deadId);
+    });
+  }
+
+  /** Multi-hop routed dispatch (mirrors axona-peer/axona_node.js). */
+  _registerRouteMsgHandler() {
+    const t = this._transport;
+    const peer = () => this._peer;
+    t.onRequest('route_msg', async (_fromId, body) => {
+      const { type, payload, targetId, originId } = body ?? {};
+      if (!peer()) return { consumed: false, atNode: null, hops: 0, exhausted: true };
+      return peer().routeMessage(targetId, type, payload, { fromId: originId });
     });
   }
 

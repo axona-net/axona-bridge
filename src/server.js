@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.9.0';
+const VERSION   = '0.10.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -62,7 +62,13 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // Lower values can never admit (they always hit the hello timeout) —
 // keep this in sync with the version that introduced client-hello on
 // the peer side.
-const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.13.0';
+// 0.14.0 is the first peer build that uses AxonManager pubsub
+// (replacing the flood-publish overlay).  Older peers send
+// 'pubsub:deliver' notifications the new bridge doesn't handle, and
+// don't send the K-closest 'pubsub:subscribe-k' / 'pubsub:publish-k'
+// frames the new path expects — so they'd be silent in the new
+// topology.  Block them at the gate instead.
+const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.14.0';
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
@@ -251,6 +257,67 @@ const httpServer = http.createServer((req, res) => {
     res.end(body);
     return;
   }
+  // ── /diag — per-connection diagnostic snapshot ─────────────────────
+  // Returns enough state to chase "why doesn't peer X receive my publishes":
+  //   - is their conn admitted (client-hello passed)?
+  //   - is their nodeId bound to a connId in WSTransport?
+  //   - is that nodeId actually in the bridge's NH-1 synaptome?
+  //     (if NOT, the bridge's pubsub fan-out skips them — root cause)
+  //   - how long since we heard from them
+  if (req.url === '/diag') {
+    const synaptome    = bridgeNode.getSynaptome();
+    const synaptomeIds = new Set(synaptome.map(s => s.peerId));   // BigInts
+    const now = Date.now();
+
+    const conns = [];
+    for (const [connId, conn] of connections) {
+      const boundNodeId = bridgeNode.transport?.nodeIdFor?.(connId) ?? null;
+      conns.push({
+        connId,
+        admitted:     conn.admitted,
+        peerVersion:  conn.peerVersion,
+        ageS:         Math.floor((now - conn.since)      / 1000),
+        lastSeenAgoS: Math.floor((now - conn.lastSeenAt) / 1000),
+        nodeId:       boundNodeId ? idToHex(boundNodeId) : null,
+        inSynaptome:  boundNodeId ? synaptomeIds.has(boundNodeId) : false,
+        ip:           conn.ip,
+        ua:           (conn.ua ?? '').slice(0, 80),
+      });
+    }
+
+    const body = JSON.stringify({
+      version:        VERSION,
+      minPeerVersion: MIN_PEER_VERSION,
+      bridge: {
+        nodeId:        idToHex(bridgeNode.nodeId),
+        region:        bridgeNode.identity.region.label,
+        synaptomeSize: synaptome.length,
+      },
+      // The connections list shows BOTH admitted & pending so we can
+      // see peers stuck in the client-hello race or post-admit but
+      // pre-handshake.
+      counts: {
+        connections: connections.size,
+        admitted:    conns.filter(c => c.admitted).length,
+        pending:     conns.filter(c => !c.admitted).length,
+        inSynaptome: conns.filter(c => c.inSynaptome).length,
+        // boundButNotInSynaptome is the "I told you so" bucket — the
+        // bridge can't pubsub-forward to these.
+        boundButNotInSynaptome:
+          conns.filter(c => c.nodeId && !c.inSynaptome).length,
+      },
+      connections: conns,
+    }, null, 2);
+
+    res.writeHead(200, {
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control':  'no-store',
+    });
+    res.end(body);
+    return;
+  }
+
   if (req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end(`axona-bridge ${VERSION}\n`);

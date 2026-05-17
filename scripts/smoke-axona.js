@@ -138,8 +138,8 @@ async function main() {
   const welcome = await nextMessage(ws, m => m.type === 'welcome');
   check('welcome arrived',                       welcome != null);
   check('welcome carries connId',                typeof welcome.connId === 'string');
-  check('welcome carries version 0.5.x or later',
-    typeof welcome.version === 'string' && welcome.version >= '0.5.0');
+  check('welcome carries a semver version',
+    typeof welcome.version === 'string' && /^\d+\.\d+\.\d+/.test(welcome.version));
 
   // peer-list will arrive next (we're alone, expect empty).
   const peerList = await nextMessage(ws, m => m.type === 'peer-list');

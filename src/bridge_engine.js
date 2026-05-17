@@ -15,6 +15,8 @@
 // node reference (the bridge has one local node).
 // =====================================================================
 
+import { AxonManager } from '@axona/protocol/pubsub/AxonManager.js';
+
 export class BridgeEngine {
   constructor(config = {}) {
     const r = config.rules ?? {};
@@ -66,6 +68,11 @@ export class BridgeEngine {
     this._directHandlers = new Map();
 
     this._theNode = null;
+
+    // Per-node AxonManager + AxonaPeer back-ref (set by orchestrator
+    // after constructing the AxonaPeer).
+    this._peerByNode = new Map();
+    this._axonByNode = new Map();
   }
 
   _emit(event) {
@@ -116,11 +123,53 @@ export class BridgeEngine {
     }
   }
 
-  axonFor(_node) {
-    throw new Error(
-      'BridgeEngine.axonFor: pub/sub not yet wired in the bridge.  ' +
-      'Roadmap item; ed25519 keypair + AxonPubSub instance follow.'
-    );
+  setPeerForNode(node, peer) {
+    if (!node || !peer) throw new Error('setPeerForNode: node and peer required');
+    this._peerByNode.set(node, peer);
+  }
+
+  axonFor(node) {
+    if (!node) throw new Error('axonFor: node required');
+    const cached = this._axonByNode.get(node);
+    if (cached) return cached;
+    const peer = this._peerByNode.get(node);
+    if (!peer) {
+      throw new Error(
+        'BridgeEngine.axonFor: AxonaPeer not registered for this node. ' +
+        'Call engine.setPeerForNode(node, peer) after constructing the peer.'
+      );
+    }
+    // sendDirect: intercept self-target.  See browser_engine.js for
+    // the rationale — AxonManager's K-closest mode sends to all K
+    // roots including self, and AxonaPeer.sendDirect over a real
+    // transport silently drops self-targeted notifies.
+    const self = peer.getNodeId();
+    const engine = this;
+    const dht = {
+      getSelfId:       () => peer.getNodeId(),
+      findKClosest:    (...args) => peer.findKClosest(...args),
+      routeMessage:    (...args) => peer.routeMessage(...args),
+      sendDirect:      async (peerId, type, payload) => {
+        if (peerId === self) {
+          const table = engine._directHandlers.get(node);
+          const h = table?.get(type);
+          if (!h) return false;
+          try {
+            await h(payload, { fromId: self.toString(16).padStart(16, '0'), type });
+            return true;
+          } catch (err) {
+            console.error('BridgeEngine self-sendDirect handler threw:', err);
+            return false;
+          }
+        }
+        return peer.sendDirect(peerId, type, payload);
+      },
+      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
+    };
+    const axon = new AxonManager({ dht });
+    this._axonByNode.set(node, axon);
+    return axon;
   }
 
   setTheNode(node) { this._theNode = node; }
