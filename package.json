@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "ws": "^8.18.0",
-    "@axona/protocol": "file:../axona-protocol"
+    "@axona/protocol": "github:axona-net/axona-protocol#afd6dd6"
   },
   "license": "MIT"
 }
