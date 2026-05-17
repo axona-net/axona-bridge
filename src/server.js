@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.5.0';
+const VERSION   = '0.6.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const startTs   = Date.now();
@@ -121,11 +121,32 @@ function logDebug(event, extra = {}) {
 }
 
 // ── Send helpers ─────────────────────────────────────────────────────
+//
+// BigInt-aware JSON: the Axona wire protocol uses BigInt node IDs
+// throughout (path[], queried set, fromId, etc.).  Native
+// JSON.stringify throws on BigInts; we use a replacer that emits
+// "<digits>n" suffixed strings, mirrored by an inverse reviver on
+// the receive side.  This is a transitional convention while the
+// canonical hex-encoding from the wire spec is rolled out across
+// every field.
+function bigintReplacer(_key, value) {
+  if (typeof value === 'bigint') return value.toString() + 'n';
+  if (value instanceof Set)      return [...value];
+  return value;
+}
+
+function bigintReviver(_key, value) {
+  if (typeof value === 'string' && /^-?\d+n$/.test(value)) {
+    return BigInt(value.slice(0, -1));
+  }
+  return value;
+}
+
 function sendTo(peerId, msg) {
   const conn = connections.get(peerId);
   if (!conn) return false;
   try {
-    conn.ws.send(JSON.stringify(msg));
+    conn.ws.send(JSON.stringify(msg, bigintReplacer));
     return true;
   } catch (err) {
     logErr('send-failed', { connId: peerId, type: msg.type, err: err.message });
@@ -139,7 +160,7 @@ function broadcast(msg, exceptId = null) {
   for (const [id, conn] of connections) {
     if (id === exceptId) continue;
     try {
-      conn.ws.send(JSON.stringify(msg));
+      conn.ws.send(JSON.stringify(msg, bigintReplacer));
       count++;
     } catch (err) {
       logErr('broadcast-send-failed', { connId: id, type: msg.type, err: err.message });
@@ -268,7 +289,7 @@ wss.on('connection', (ws, req) => {
     }
     let msg;
     try {
-      msg = JSON.parse(data.toString());
+      msg = JSON.parse(data.toString(), bigintReviver);
     } catch (err) {
       logErr('bad-json', { connId: id, err: err.message });
       return;

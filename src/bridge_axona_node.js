@@ -254,7 +254,11 @@ export class BridgeAxonaNode {
         hops:        payload.hops,
         path:        payload.path,
         trace:       payload.trace,
-        queried:     payload.queried,
+        queried:     payload.queried instanceof Set
+                       ? payload.queried
+                       : Array.isArray(payload.queried)
+                           ? new Set(payload.queried)
+                           : new Set(),
         totalTimeMs: payload.totalTimeMs,
       });
     });
