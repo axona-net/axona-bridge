@@ -41,7 +41,10 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import http   from 'http';
 
-const VERSION   = '0.4.0';
+import { BridgeAxonaNode } from './bridge_axona_node.js';
+import { idToHex }         from './identity.js';
+
+const VERSION   = '0.5.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const startTs   = Date.now();
@@ -145,6 +148,23 @@ function broadcast(msg, exceptId = null) {
   return count;
 }
 
+// ── Embedded Axona peer (Phase 3) ────────────────────────────────────
+//
+// The bridge runs its own AxonaPeer as a server-class highway node.
+// Its WebSocket transport piggybacks on the existing browser-bridge
+// WebSocket connections; no node-webrtc dependency.  See
+// `bridge_axona_node.js` and `ws_transport.js` for the wire shape.
+const bridgeNode = new BridgeAxonaNode({
+  sendToConn: (connId, msg) => sendTo(connId, msg),
+  isConnOpen: (connId) => connections.has(connId),
+  log: (event, detail) => logDebug(`axona:${event}`, detail),
+});
+await bridgeNode.start();
+log('axona-ready', {
+  nodeId: idToHex(bridgeNode.nodeId),
+  region: bridgeNode.identity.region.label,
+});
+
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
   if (req.url === '/healthz') {
@@ -153,6 +173,11 @@ const httpServer = http.createServer((req, res) => {
       connections: connections.size,
       uptimeS:     Math.floor((Date.now() - startTs) / 1000),
       version:     VERSION,
+      axona: {
+        nodeId:         idToHex(bridgeNode.nodeId),
+        region:         bridgeNode.identity.region.label,
+        synaptomeSize:  bridgeNode.getSynaptome().length,
+      },
     });
     res.writeHead(200, {
       'Content-Type':   'application/json',
@@ -224,6 +249,12 @@ wss.on('connection', (ws, req) => {
   );
   log('peer-announce', { connId: id, peers: existingPeers.length, announcedTo });
 
+  // 4. Send the Axona bootstrap-offer (hello).  The new peer's
+  //    BridgeTransport will reply with hello-ack carrying its
+  //    Axona nodeId; that's when our bridge node admits this
+  //    browser into its synaptome.
+  bridgeNode.sendHello(id);
+
   ws.on('message', (data, isBinary) => {
     // Any inbound bytes — even a malformed payload — count as proof
     // the peer is still alive.  Stamping liveness before parse means
@@ -256,6 +287,16 @@ wss.on('connection', (ws, req) => {
           logDebug('pong', { connId: id, n: conn.pings });
         } catch (err) {
           logErr('pong-send-failed', { connId: id, err: err.message });
+        }
+        break;
+      }
+
+      case 'axona': {
+        // Axona wire frame from the peer.  The transport unpacks
+        // req/res/ntf, dispatches to handlers, and writes the
+        // response back through the same connection.
+        if (msg.payload && typeof msg.payload === 'object') {
+          bridgeNode.handleAxonaFrame(id, msg.payload);
         }
         break;
       }
@@ -297,6 +338,10 @@ wss.on('connection', (ws, req) => {
   ws.on('close', (code, reason) => {
     const lifeS = Math.floor((Date.now() - since) / 1000);
     connections.delete(id);
+
+    // Let the embedded Axona node clean up its bindings + reject any
+    // pending requests to this peer.
+    bridgeNode.handleConnClosed(id);
 
     // Tell everyone remaining that this peer is gone.  They'll tear
     // down their RTCPeerConnection for this id.

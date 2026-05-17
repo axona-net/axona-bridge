@@ -2,13 +2,23 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-The bridge does **not** yet speak the Axona protocol — that's Phase 3. The two earlier phases prove the wire works:
+The bridge speaks the Axona protocol as of **v0.5.0**. It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap (256), routable target for any browser peer's lookups.
 
 | Phase | Role of bridge |
 |---|---|
 | 1 | Single-peer connectivity test (`ping` → `pong` only) |
-| **2** (current) | Adds signaling: `peer-list`, `peer-joined`, `peer-left`, opaque `signal` relay |
-| 3 (future) | Drops in the Axona DHT protocol; bridge becomes the bootstrap peer |
+| 2 | Signaling: `peer-list`, `peer-joined`, `peer-left`, opaque `signal` relay |
+| **3** (current) | Axona protocol participant: persistent nodeId, hello/hello-ack handshake on each browser connection, NH-1 routing primitives over WebSocket, `/healthz` reports nodeId + synaptome size |
+
+The Axona wire frames piggyback on the existing browser ↔ bridge WebSocket as `{type: 'axona', payload: <req/res/ntf frame>}`. No `node-webrtc` dependency.
+
+Configure the bridge's geographic prefix via env vars:
+
+```bash
+BRIDGE_LAT=51.5  BRIDGE_LNG=-0.1  BRIDGE_REGION_LABEL="London"  npm start
+```
+
+Identity persists in `bridge-identity.json` (override path with `BRIDGE_IDENTITY_PATH`).
 
 ## Quickstart (local)
 
