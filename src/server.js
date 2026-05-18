@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.11.0';
+const VERSION   = '0.11.1';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -285,6 +285,30 @@ const httpServer = http.createServer((req, res) => {
       });
     }
 
+    // Axon roles the bridge currently holds.  Each entry shows the
+    // topicId, whether the bridge created this role (root vs sub),
+    // how many children (subscribers) are registered, and the
+    // current cache size (how many messages are sitting in
+    // replayCache waiting for late-arriving subscribers).  This is
+    // the critical observability surface for debugging
+    // publish-before-subscribe replay failures.
+    const axonRoles = [];
+    const axon = bridgeNode._axon;
+    if (axon?.axonRoles) {
+      for (const [topicId, role] of axon.axonRoles) {
+        axonRoles.push({
+          topic:        idToHex(topicId),
+          isRoot:       !!role.isRoot,
+          children:     [...(role.children?.keys?.() ?? [])].map(idToHex),
+          cacheSize:    role.replayCache?.length ?? 0,
+          createdAgoS:  role.roleCreatedAt
+            ? Math.floor((now - role.roleCreatedAt) / 1000) : null,
+          emptiedAgoS:  role.emptiedAt
+            ? Math.floor((now - role.emptiedAt) / 1000) : null,
+        });
+      }
+    }
+
     const body = JSON.stringify({
       version:        VERSION,
       minPeerVersion: MIN_PEER_VERSION,
@@ -305,7 +329,9 @@ const httpServer = http.createServer((req, res) => {
         // bridge can't pubsub-forward to these.
         boundButNotInSynaptome:
           conns.filter(c => c.nodeId && !c.inSynaptome).length,
+        axonRoles:   axonRoles.length,
       },
+      axonRoles,
       connections: conns,
     }, null, 2);
 
