@@ -5,3 +5,4 @@ node_modules/
 .DS_Store
 # Persistent bridge identity — operator-specific, never committed.
 bridge-identity.json
+.npm-cache/
