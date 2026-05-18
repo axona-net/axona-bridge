@@ -139,10 +139,13 @@ export class BridgeEngine {
         'Call engine.setPeerForNode(node, peer) after constructing the peer.'
       );
     }
-    // sendDirect: intercept self-target.  See browser_engine.js for
-    // the rationale — AxonManager's K-closest mode sends to all K
-    // roots including self, and AxonaPeer.sendDirect over a real
-    // transport silently drops self-targeted notifies.
+    // sendDirect: see browser_engine.js for the full rationale.
+    //   self        → local dispatch
+    //   directly    → peer.sendDirect (1-hop transport.notify)
+    //     bound
+    //   else        → peer.routeMessage with a '__tunneled_direct__'
+    //                 envelope; receiver's routed handler unwraps and
+    //                 dispatches into its direct handler table.
     const self = peer.getNodeId();
     const engine = this;
     const dht = {
@@ -162,11 +165,43 @@ export class BridgeEngine {
             return false;
           }
         }
-        return peer.sendDirect(peerId, type, payload);
+        // Probe: is the target's connId currently bound + WS open on
+        // our WebSocketTransport?  If yes, direct delivery works.
+        if (node.transport?.isConnected?.(peerId)) {
+          return peer.sendDirect(peerId, type, payload);
+        }
+        peer.routeMessage(peerId, '__tunneled_direct__', {
+          targetId:  peerId.toString(16).padStart(16, '0'),
+          innerType: type,
+          innerPayload: payload,
+        }).catch(err => console.error('BridgeEngine routed sendDirect failed:', err));
+        return true;
       },
       onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
       onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
     };
+
+    peer.onRoutedMessage('__tunneled_direct__', async (payload, meta) => {
+      const targetBig = typeof meta.targetId === 'bigint'
+        ? meta.targetId
+        : (typeof meta.targetId === 'string'
+            ? BigInt('0x' + meta.targetId.replace(/^0x/, ''))
+            : null);
+      if (targetBig == null) return 'forward';
+      if (targetBig !== self) return 'forward';
+      const handler = engine._directHandlers.get(node)?.get(payload.innerType);
+      if (!handler) return 'consumed';
+      try {
+        await handler(payload.innerPayload, {
+          fromId: meta.fromId,
+          type:   payload.innerType,
+        });
+      } catch (err) {
+        console.error('BridgeEngine tunneled-direct dispatch threw:', err);
+      }
+      return 'consumed';
+    });
+
     const axon = new AxonManager({ dht });
     this._axonByNode.set(node, axon);
     return axon;
