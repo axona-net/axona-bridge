@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.11.1';
+const VERSION   = '0.11.2';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -228,6 +228,25 @@ log('axona-ready', {
 
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
+  // CORS — /healthz and /diag are read-only diagnostic endpoints that
+  // peers fetch from their browser console (axona.net origin) to
+  // introspect bridge state.  Permissive Access-Control-Allow-Origin
+  // is safe here because the data is non-sensitive (no credentials,
+  // no per-user info) and any peer that connects to the bridge could
+  // already infer it from its own state.  GET only; we also handle the
+  // pre-flight OPTIONS so browsers don't reject the simple request.
+  const cors = {
+    'Access-Control-Allow-Origin':  '*',
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age':       '86400',
+  };
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+
   if (req.url === '/healthz') {
     // Count admitted vs pending so operators can see how many
     // connections passed the version gate.
@@ -253,6 +272,7 @@ const httpServer = http.createServer((req, res) => {
       'Content-Type':   'application/json',
       'Content-Length': Buffer.byteLength(body),
       'Cache-Control':  'no-store',
+      ...cors,
     });
     res.end(body);
     return;
@@ -339,6 +359,7 @@ const httpServer = http.createServer((req, res) => {
       'Content-Type':   'application/json',
       'Content-Length': Buffer.byteLength(body),
       'Cache-Control':  'no-store',
+      ...cors,
     });
     res.end(body);
     return;
