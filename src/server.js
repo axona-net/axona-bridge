@@ -68,7 +68,11 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // don't send the K-closest 'pubsub:subscribe-k' / 'pubsub:publish-k'
 // frames the new path expects — so they'd be silent in the new
 // topology.  Block them at the gate instead.
-const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '0.14.0';
+// I5 / v1.0 cutover: gate is bumped to 1.0.0 — the new wire format
+// (264-bit hex node IDs, kernel-driven AxonaPeer + AxonManager,
+// public-mode topics, signed envelopes via Ed25519) is incompatible
+// with anything pre-1.0.  Old peers get UPGRADE_REQUIRED (close 4426).
+const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.0.0';
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
