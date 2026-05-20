@@ -153,12 +153,13 @@ async function main() {
   check('axona hello frame arrived',
     hello.payload.body?.proto === 'axona/3' &&
     typeof hello.payload.body?.nodeId === 'string' &&
-    hello.payload.body.nodeId.length === 16);
+    hello.payload.body.nodeId.length === 66);
 
   const bridgeNodeId = BigInt('0x' + hello.payload.body.nodeId);
 
   // ── Reply with hello-ack carrying our (fake browser) nodeId ──────
-  const myNodeId = 0xC0FFEEC0FFEEC0FFn;
+  // 264-bit fake nodeId — 8-bit S2 prefix 0xdf (us-east) + arbitrary bottom bits.
+  const myNodeId = 0xdfC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFn;
   ws.send(JSON.stringify({
     type: 'axona',
     payload: {
@@ -166,7 +167,7 @@ async function main() {
       type: 'hello-ack',
       body: {
         proto:  'axona/3',
-        nodeId: myNodeId.toString(16).padStart(16, '0'),
+        nodeId: myNodeId.toString(16).padStart(66, '0'),
       },
     },
   }));

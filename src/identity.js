@@ -100,6 +100,12 @@ export async function loadOrDeriveIdentity() {
           `bridge-identity: legacy v0.x identity at ${path} (16-char hex); ` +
           'I4 migration re-derives a fresh v1.0 identity.  ' +
           'Delete the file or remove the path to silence this.');
+      } else if (typeof envelope?.id === 'string' && envelope.id.length === 66
+                 && !envelope.pubkey) {
+        // v1.0 envelope without kernel material is also un-loadable.
+        console.error(
+          `bridge-identity: ${path} has 264-bit id but no kernel pubkey; ` +
+          'cannot reconstruct Ed25519 keypair, re-deriving.');
       } else {
         // Kernel envelope.  loadIdentity verifies internal consistency.
         const kernel = await loadIdentity(envelope);
@@ -133,12 +139,15 @@ export async function loadOrDeriveIdentity() {
 
 /** Build the hybrid identity object from a kernel identity. */
 function buildHybrid(kernel, regionLabels) {
-  // Top 64 bits of kernel hex = same S2 prefix in top 8 bits, then
-  // 56 bits derived from sha256(pubkey).  Deterministic per identity.
-  const idLegacy = BigInt('0x' + kernel.id.slice(0, 16));
+  // v1.1: full-width 264-bit node ID — same address space as
+  // topic IDs so K-closest XOR distance is meaningful (top 8 bits
+  // = S2 region prefix on both peer IDs and topic IDs).  Replaces
+  // the previous .slice(0, 16) which left the bridge in a 64-bit
+  // mesh while topics were 264-bit.
+  const idBig = BigInt('0x' + kernel.id);
   return {
-    // Legacy
-    id:         idLegacy,
+    // Legacy field name; value is now 264-bit BigInt.
+    id:         idBig,
     geoBits:    GEO_BITS,
     region:     {
       lat:   kernel.region.lat,
@@ -155,6 +164,7 @@ function buildHybrid(kernel, regionLabels) {
   };
 }
 
-/** Format a 64-bit BigInt nodeId as a 16-char hex string (Axona wire
- *  convention for the legacy mesh / bridge handshake). */
-export function idToHex(id) { return id.toString(16).padStart(16, '0'); }
+/** Format a 264-bit BigInt nodeId as a 66-char hex string (v1.1 wire
+ *  convention: top 8 bits = S2 region prefix, rest = pubkey-derived
+ *  hash; same width as topic IDs). */
+export function idToHex(id) { return id.toString(16).padStart(66, '0'); }

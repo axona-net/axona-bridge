@@ -165,7 +165,7 @@ export class BridgeEngine {
           const h = peer._directHandlers?.get(type);
           if (!h) return false;
           try {
-            await h(payload, { fromId: self.toString(16).padStart(16, '0'), type });
+            await h(payload, { fromId: self.toString(16).padStart(66, '0'), type });
             return true;
           } catch (err) {
             console.error('BridgeEngine self-sendDirect handler threw:', err);
@@ -178,7 +178,7 @@ export class BridgeEngine {
           return peer.sendDirect(peerId, type, payload);
         }
         peer.routeMessage(peerId, '__tunneled_direct__', {
-          targetId:  peerId.toString(16).padStart(16, '0'),
+          targetId:  peerId.toString(16).padStart(66, '0'),
           innerType: type,
           innerPayload: payload,
         }).catch(err => console.error('BridgeEngine routed sendDirect failed:', err));

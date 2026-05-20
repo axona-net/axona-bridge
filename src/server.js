@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '1.0.0';
+const VERSION   = '1.1.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -72,7 +72,13 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // (264-bit hex node IDs, kernel-driven AxonaPeer + AxonManager,
 // public-mode topics, signed envelopes via Ed25519) is incompatible
 // with anything pre-1.0.  Old peers get UPGRADE_REQUIRED (close 4426).
-const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.0.0';
+// v1.1 cutover: completes the 264-bit migration so peer IDs really
+// occupy the same 264-bit address space as topic IDs (axona-peer/-bridge
+// previously truncated to 64 bits at the identity layer, making K-closest
+// XOR distance meaningless against topics).  Wire format now carries
+// 66-char hex nodeIds in every hello/hello-ack/peer-list/tunneled-direct
+// envelope; 1.0.x peers send 16-char ids and get UPGRADE_REQUIRED.
+const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.1.0';
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
