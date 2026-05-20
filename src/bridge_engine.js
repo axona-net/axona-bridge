@@ -128,6 +128,13 @@ export class BridgeEngine {
     this._peerByNode.set(node, peer);
   }
 
+  /** I4: alias `axonManagerFor` → `axonFor` so the kernel's
+   *  AxonaPeer._requireAxonManager resolution chain finds our
+   *  per-node AxonManager and peer.pub / peer.sub etc. work
+   *  without the SDK pre-stashing a handle.  Same pattern as
+   *  axona-peer's BrowserEngine (commit 6e613d7). */
+  axonManagerFor(node) { return this.axonFor(node); }
+
   axonFor(node) {
     if (!node) throw new Error('axonFor: node required');
     const cached = this._axonByNode.get(node);
@@ -154,8 +161,8 @@ export class BridgeEngine {
       routeMessage:    (...args) => peer.routeMessage(...args),
       sendDirect:      async (peerId, type, payload) => {
         if (peerId === self) {
-          const table = engine._directHandlers.get(node);
-          const h = table?.get(type);
+          // I4 / Phase 5a: direct-handler table lives on the peer now.
+          const h = peer._directHandlers?.get(type);
           if (!h) return false;
           try {
             await h(payload, { fromId: self.toString(16).padStart(16, '0'), type });
@@ -189,7 +196,8 @@ export class BridgeEngine {
             : null);
       if (targetBig == null) return 'forward';
       if (targetBig !== self) return 'forward';
-      const handler = engine._directHandlers.get(node)?.get(payload.innerType);
+      // I4 / Phase 5a: direct-handler table lives on the peer now.
+      const handler = peer._directHandlers?.get(payload.innerType);
       if (!handler) return 'consumed';
       try {
         await handler(payload.innerPayload, {

@@ -27,13 +27,27 @@ import {
   AxonaPeer,
   NeuronNode,
   Synapse,
-  clz64,
 } from '@axona/protocol';
+
+// I4: kernel v1.0 dropped clz64 in favour of the 264-bit clz264 (it
+// lives at utils/hexid.js).  Bridge node.id is still on the legacy
+// 64-bit BigInt path (top 64 bits of kernel hex identity from #46-style
+// migration), so we keep a fast Math.clz32-chunks shim here — same
+// shape as axona-peer/src/axona_node.js and dht-sim's TransportAxonaEngine.
+function clz64(x) {
+  if (x === 0n) return 64;
+  const hi = Number((x >> 32n) & 0xFFFFFFFFn);
+  if (hi !== 0) return Math.clz32(hi);
+  const lo = Number(x & 0xFFFFFFFFn);
+  return 32 + Math.clz32(lo);
+}
 
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
-import { mountAxonalPubsub }  from './pubsub_axonal.js';
+// pubsub_axonal.js (legacy { msg, publisher } wrapper) retired in I4.
+// Bridge participates in pub/sub via the kernel's unified API on
+// AxonaPeer — peer.pub / peer.sub / peer.pull / peer.metrics.
 
 export class BridgeAxonaNode {
   /**
@@ -70,9 +84,12 @@ export class BridgeAxonaNode {
    * await once and then can immediately use the public methods.
    */
   async start() {
-    this._identity = loadOrDeriveIdentity();
+    // I4: loadOrDeriveIdentity is async now (kernel deriveIdentity
+    // uses Web Crypto Ed25519 keygen).
+    this._identity = await loadOrDeriveIdentity();
     this._log('identity-loaded', {
       nodeId: idToHex(this._identity.id),
+      idHex:  this._identity.idHex,
       region: this._identity.region.label,
       createdAt: this._identity.createdAt,
     });
@@ -98,21 +115,21 @@ export class BridgeAxonaNode {
 
     this._registerNH1Handlers();
 
-    this._peer = new AxonaPeer({ engine: this._engine, node: this._node });
+    // I4: pass identity to AxonaPeer so the kernel's unified pub/sub
+    // path (peer.pub) can build signed envelopes.
+    this._peer = new AxonaPeer({
+      engine:   this._engine,
+      node:     this._node,
+      identity: this._identity,
+    });
     await this._peer.start();
 
-    // Real DHT-based pub/sub.  Bridge participates as a normal DHT
-    // peer — when its nodeId is among the K-closest to a topic, it
-    // becomes that topic's axon and forwards via sendDirect to
-    // subscribers; otherwise it's just a routing hop.  No more
-    // application-layer flood forwarding.
+    // Register peer with engine so axonManagerFor(node) resolves
+    // when peer.pub / peer.sub call _requireAxonManager.  The
+    // BridgeEngine.axonManagerFor alias (added in this commit)
+    // delegates to axonFor.  No more mountAxonalPubsub wrapper —
+    // bridge uses the kernel unified pub/sub directly.
     this._engine.setPeerForNode(this._node, this._peer);
-    this._axon = this._engine.axonFor(this._node);
-    this._pubsub = mountAxonalPubsub({
-      axon: this._axon,
-      peer: this._peer,
-      log:  this._log,
-    });
 
     this._registerRouteMsgHandler();
 
