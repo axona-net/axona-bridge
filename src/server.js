@@ -44,7 +44,7 @@ import http   from 'http';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 
-const VERSION   = '0.13.0';
+const VERSION   = '1.0.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
