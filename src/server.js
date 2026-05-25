@@ -43,8 +43,9 @@ import http   from 'http';
 
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
+import { KERNEL_VERSION }  from '@axona/protocol';
 
-const VERSION   = '1.1.3';
+const VERSION   = '1.1.4';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -272,6 +273,7 @@ const httpServer = http.createServer((req, res) => {
       minPeerVersion: MIN_PEER_VERSION,
       uptimeS:        Math.floor((Date.now() - startTs) / 1000),
       version:        VERSION,
+      kernelVersion:  KERNEL_VERSION,
       axona: {
         nodeId:         idToHex(bridgeNode.nodeId),
         region:         bridgeNode.identity.region.label,
@@ -341,6 +343,7 @@ const httpServer = http.createServer((req, res) => {
 
     const body = JSON.stringify({
       version:        VERSION,
+      kernelVersion:  KERNEL_VERSION,
       minPeerVersion: MIN_PEER_VERSION,
       bridge: {
         nodeId:        idToHex(bridgeNode.nodeId),
@@ -445,10 +448,11 @@ wss.on('connection', (ws, req) => {
     //     into welcome so peer JS never sees a long-term secret.
     const turn = makeTurnCredential(id);
     sendTo(id, {
-      type:    'welcome',
-      connId:  id,
-      serverT: Date.now(),
-      version: VERSION,
+      type:          'welcome',
+      connId:        id,
+      serverT:       Date.now(),
+      version:       VERSION,
+      kernelVersion: KERNEL_VERSION,
       turn,
     });
 
