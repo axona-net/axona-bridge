@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION }  from '@axona/protocol';
 
-const VERSION   = '2.0.0';
+const VERSION   = '2.0.1';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
