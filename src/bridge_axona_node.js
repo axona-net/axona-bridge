@@ -124,9 +124,9 @@ export class BridgeAxonaNode {
     });
     await this._peer.start();
 
-    // Register peer with engine so axonManagerFor(node) resolves
-    // when peer.pub / peer.sub call _requireAxonManager.  The
-    // BridgeEngine.axonManagerFor alias (added in this commit)
+    // Register peer with engine so axonaManagerFor(node) resolves
+    // when peer.pub / peer.sub call _requireAxonaManager.  The
+    // BridgeEngine.axonaManagerFor alias (added in this commit)
     // delegates to axonFor.  No more mountAxonalPubsub wrapper —
     // bridge uses the kernel unified pub/sub directly.
     this._engine.setPeerForNode(this._node, this._peer);

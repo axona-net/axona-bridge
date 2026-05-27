@@ -63,14 +63,14 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // Lower values can never admit (they always hit the hello timeout) —
 // keep this in sync with the version that introduced client-hello on
 // the peer side.
-// 0.14.0 is the first peer build that uses AxonManager pubsub
+// 0.14.0 is the first peer build that uses AxonaManager pubsub
 // (replacing the flood-publish overlay).  Older peers send
 // 'pubsub:deliver' notifications the new bridge doesn't handle, and
 // don't send the K-closest 'pubsub:subscribe-k' / 'pubsub:publish-k'
 // frames the new path expects — so they'd be silent in the new
 // topology.  Block them at the gate instead.
 // I5 / v1.0 cutover: gate is bumped to 1.0.0 — the new wire format
-// (264-bit hex node IDs, kernel-driven AxonaPeer + AxonManager,
+// (264-bit hex node IDs, kernel-driven AxonaPeer + AxonaManager,
 // public-mode topics, signed envelopes via Ed25519) is incompatible
 // with anything pre-1.0.  Old peers get UPGRADE_REQUIRED (close 4426).
 // v1.1 cutover: completes the 264-bit migration so peer IDs really

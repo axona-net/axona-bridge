@@ -15,7 +15,7 @@
 // node reference (the bridge has one local node).
 // =====================================================================
 
-import { AxonManager } from '@axona/protocol/pubsub/AxonManager.js';
+import { AxonaManager } from '@axona/protocol/pubsub/AxonaManager.js';
 
 export class BridgeEngine {
   constructor(config = {}) {
@@ -69,7 +69,7 @@ export class BridgeEngine {
 
     this._theNode = null;
 
-    // Per-node AxonManager + AxonaPeer back-ref (set by orchestrator
+    // Per-node AxonaManager + AxonaPeer back-ref (set by orchestrator
     // after constructing the AxonaPeer).
     this._peerByNode = new Map();
     this._axonByNode = new Map();
@@ -128,12 +128,12 @@ export class BridgeEngine {
     this._peerByNode.set(node, peer);
   }
 
-  /** I4: alias `axonManagerFor` → `axonFor` so the kernel's
-   *  AxonaPeer._requireAxonManager resolution chain finds our
-   *  per-node AxonManager and peer.pub / peer.sub etc. work
+  /** I4: alias `axonaManagerFor` → `axonFor` so the kernel's
+   *  AxonaPeer._requireAxonaManager resolution chain finds our
+   *  per-node AxonaManager and peer.pub / peer.sub etc. work
    *  without the SDK pre-stashing a handle.  Same pattern as
    *  axona-peer's BrowserEngine (commit 6e613d7). */
-  axonManagerFor(node) { return this.axonFor(node); }
+  axonaManagerFor(node) { return this.axonFor(node); }
 
   axonFor(node) {
     if (!node) throw new Error('axonFor: node required');
@@ -210,7 +210,7 @@ export class BridgeEngine {
       return 'consumed';
     });
 
-    const axon = new AxonManager({ dht });
+    const axon = new AxonaManager({ dht });
     this._axonByNode.set(node, axon);
     return axon;
   }
