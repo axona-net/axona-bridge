@@ -10,7 +10,8 @@
     "dev":          "node --watch src/server.js",
     "smoke":        "node scripts/smoke-client.js",
     "smoke:signal": "node scripts/signal-smoke.js",
-    "smoke:axona":  "node scripts/smoke-axona.js"
+    "smoke:axona":  "node scripts/smoke-axona.js",
+    "smoke:pubsub": "node scripts/smoke-pubsub-relay.js"
   },
   "engines": {
     "node": ">=20.0.0"
