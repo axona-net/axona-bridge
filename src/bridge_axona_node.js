@@ -131,6 +131,32 @@ export class BridgeAxonaNode {
     // bridge uses the kernel unified pub/sub directly.
     this._engine.setPeerForNode(this._node, this._peer);
 
+    // Eagerly build the bridge's AxonaManager NOW, at startup.
+    //
+    // Regression fix (introduced in I4, commit 8a54a6e): before I4 the
+    // bridge built its pub/sub engine eagerly via
+    //   this._axon = this._engine.axonFor(this._node);
+    // I4 dropped that line, relying on the kernel's lazy
+    // _requireAxonaManager — which only fires on peer.sub / peer.pub.
+    // The bridge never subscribes or publishes, so its AxonaManager was
+    // never constructed, and the pubsub:subscribe-k / publish-k /
+    // deliver direct-message handlers (registered in the AxonaManager
+    // constructor) were never installed.  Every pub/sub frame addressed
+    // to the bridge was silently dropped.
+    //
+    // Because the bridge is in every peer's synaptome (universal
+    // connector) and is XOR-close to regional topics (its 0x89 us-east
+    // prefix matches us-east/* topic IDs), peers routinely pick the
+    // bridge as a K-closest axon — and it black-holed those
+    // subscriptions, so publishes routed by other peers reached some
+    // subscribers and missed others (the cross-app delivery asymmetry).
+    //
+    // Building it here registers the handlers and makes the bridge a
+    // real relay axon again.  arm refreshTick so its role children get
+    // TTL-swept and its K-closest cache stays fresh.
+    this._axon = this._engine.axonaManagerFor(this._node);
+    this._axon?.start?.();
+
     this._registerRouteMsgHandler();
 
     return this;

@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION }  from '@axona/protocol';
 
-const VERSION   = '2.0.2';
+const VERSION   = '2.1.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -325,7 +325,11 @@ const httpServer = http.createServer((req, res) => {
     // the critical observability surface for debugging
     // publish-before-subscribe replay failures.
     const axonRoles = [];
-    const axon = bridgeNode._axon;
+    // The AxonaManager lives at peer._axonaManager (the kernel's lazily-
+    // built pub/sub engine), NOT bridgeNode._axon — that legacy field
+    // was never set, so this readout silently reported zero roles
+    // regardless of actual state.  Reach through the AxonaPeer.
+    const axon = bridgeNode._peer?._axonaManager ?? bridgeNode._axon;
     if (axon?.axonRoles) {
       for (const [topicId, role] of axon.axonRoles) {
         axonRoles.push({
