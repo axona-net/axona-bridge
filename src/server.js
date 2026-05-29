@@ -43,9 +43,9 @@ import http   from 'http';
 
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
-import { KERNEL_VERSION }  from '@axona/protocol';
+import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.2.0';
+const VERSION   = '2.3.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -229,6 +229,17 @@ function broadcast(msg, exceptId = null) {
 const bridgeNode = new BridgeAxonaNode({
   sendToConn: (connId, msg) => sendTo(connId, msg),
   isConnOpen: (connId) => connections.has(connId),
+  // axona/4 — close a connection with the Upgrade-Required code when its
+  // peer can't complete the authenticated handshake (e.g. it speaks the
+  // legacy axona/3 hello).  This is the clean, proto-level upgrade
+  // signal: the peer's kernel prints "[axona] UPGRADE REQUIRED …" on a
+  // 4426 close.  (The WS-level version gate can't separate v3 from v4
+  // because the peer app version is already numerically above any kernel
+  // threshold; the proto at the hello layer is the real boundary.)
+  closeConn: (connId, reason) => {
+    const conn = connections.get(connId);
+    if (conn?.ws) { try { conn.ws.close(CLOSE_UPGRADE_REQUIRED, reason); } catch { /* dying */ } }
+  },
   log: (event, detail) => logDebug(`axona:${event}`, detail),
 });
 await bridgeNode.start();
@@ -451,12 +462,19 @@ wss.on('connection', (ws, req) => {
     // 1a. Mint a short-lived TURN credential (2h expiry) bundled
     //     into welcome so peer JS never sees a long-term secret.
     const turn = makeTurnCredential(id);
+    // axona/4 — mint a fresh per-connection nonce; it (with the connId)
+    // is the channel-binding value the peer folds into its signed hello,
+    // and we fold into ours.  A hello captured on one connection can't
+    // be replayed onto another.
+    const serverNonce = makeNonce();
+    conn.serverNonce = serverNonce;
     sendTo(id, {
       type:          'welcome',
       connId:        id,
       serverT:       Date.now(),
       version:       VERSION,
       kernelVersion: KERNEL_VERSION,
+      serverNonce,
       turn,
     });
 
@@ -477,9 +495,9 @@ wss.on('connection', (ws, req) => {
     log('peer-announce', { connId: id, peers: admittedPeers.length, announcedTo });
 
     // 4. Axona bootstrap-offer.  The peer's BridgeTransport replies
-    //    with hello-ack carrying its nodeId; that's when our bridge
-    //    node admits this browser into its synaptome.
-    bridgeNode.sendHello(id);
+    //    with an authenticated hello-ack proving its nodeId; that's
+    //    when our bridge node admits this browser into its synaptome.
+    bridgeNode.sendHello(id, serverNonce);
   }
 
   ws.on('message', (data, isBinary) => {

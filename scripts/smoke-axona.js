@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
+import { deriveIdentity, buildAuthHello, cbvFromNonces } from '@axona/protocol';
 
 const BRIDGE_PORT = 19082;
 const BRIDGE_URL  = `ws://localhost:${BRIDGE_PORT}`;
@@ -146,30 +147,30 @@ async function main() {
   check('peer-list arrived (empty)',
     peerList.peers && Array.isArray(peerList.peers) && peerList.peers.length === 0);
 
-  // The bridge's embedded peer sends hello — an axona-typed message.
+  // The bridge's embedded peer sends an AUTHENTICATED hello (axona/4):
+  // proto + nodeId + pubkey + Ed25519 sig over the per-connection CBV.
   const hello = await nextMessage(ws, m =>
     m.type === 'axona' && m.payload?.type === 'hello'
   );
-  check('axona hello frame arrived',
-    hello.payload.body?.proto === 'axona/3' &&
+  check('axona/4 authenticated hello frame arrived',
+    hello.payload.body?.proto === 'axona/4' &&
     typeof hello.payload.body?.nodeId === 'string' &&
-    hello.payload.body.nodeId.length === 66);
+    hello.payload.body.nodeId.length === 66 &&
+    typeof hello.payload.body?.pubkey === 'string' &&
+    typeof hello.payload.body?.sig === 'string');
 
   const bridgeNodeId = BigInt('0x' + hello.payload.body.nodeId);
 
-  // ── Reply with hello-ack carrying our (fake browser) nodeId ──────
-  // 264-bit fake nodeId — 8-bit S2 prefix 0xdf (us-east) + arbitrary bottom bits.
-  const myNodeId = 0xdfC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFC0FFEEC0FFEEC0FFn;
+  // ── Reply with an AUTHENTICATED hello-ack ────────────────────────
+  // Pose as a real browser peer: a genuine Ed25519 identity, signing
+  // over the same channel-binding value (welcome.serverNonce + connId).
+  const browser  = await deriveIdentity({ lat: 38.0, lng: -77.0 });
+  const myNodeId = BigInt('0x' + browser.id);
+  const cbv      = cbvFromNonces(welcome.serverNonce, welcome.connId, 'bridge');
+  const ack      = await buildAuthHello({ identity: browser, cbv });
   ws.send(JSON.stringify({
     type: 'axona',
-    payload: {
-      k: 'ntf',
-      type: 'hello-ack',
-      body: {
-        proto:  'axona/3',
-        nodeId: myNodeId.toString(16).padStart(66, '0'),
-      },
-    },
+    payload: { k: 'ntf', type: 'hello-ack', body: ack },
   }));
 
   // Bridge admits us into its synaptome on the hello-ack.  Give it a

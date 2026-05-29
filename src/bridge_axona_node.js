@@ -27,6 +27,10 @@ import {
   AxonaPeer,
   NeuronNode,
   Synapse,
+  buildAuthHello,
+  verifyAuthHello,
+  cbvFromNonces,
+  sign as edSign,
 } from '@axona/protocol';
 
 // I4: kernel v1.0 dropped clz64 in favour of the 264-bit clz264 (it
@@ -56,12 +60,13 @@ export class BridgeAxonaNode {
    * @param {(connId: string) => boolean}              opts.isConnOpen
    * @param {(event:string, data?:object) => void}     [opts.log]
    */
-  constructor({ sendToConn, isConnOpen, log }) {
+  constructor({ sendToConn, isConnOpen, closeConn = null, log }) {
     if (typeof sendToConn !== 'function' || typeof isConnOpen !== 'function') {
       throw new TypeError('BridgeAxonaNode: sendToConn + isConnOpen required');
     }
     this._sendToConn = sendToConn;
     this._isConnOpen = isConnOpen;
+    this._closeConn  = typeof closeConn === 'function' ? closeConn : () => {};
     this._log = log ?? (() => {});
 
     this._identity  = null;
@@ -70,8 +75,21 @@ export class BridgeAxonaNode {
     this._transport = null;
     this._peer      = null;
 
+    // axona/4 — signer adapter for the authenticated handshake (the
+    // identity object holds privateKey + pubkeyHex but no sign()), and
+    // the per-connection serverNonce that anchors each link's CBV.
+    this._authIdentity     = null;
+    this._serverNonceByConn = new Map();
+
     /** @type {Map<string, 'pending'|'complete'>} connId → handshake state */
     this._helloByConnId = new Map();
+  }
+
+  /** CBV for a bridge link = the connection's serverNonce + connId. */
+  _bridgeCbv(connId) {
+    const nonce = this._serverNonceByConn.get(connId);
+    if (!nonce) return null;
+    return cbvFromNonces(nonce, connId, 'bridge');
   }
 
   get identity()  { return this._identity; }
@@ -87,6 +105,13 @@ export class BridgeAxonaNode {
     // I4: loadOrDeriveIdentity is async now (kernel deriveIdentity
     // uses Web Crypto Ed25519 keygen).
     this._identity = await loadOrDeriveIdentity();
+    // axona/4 — adapter shaped like the kernel Identity that
+    // buildAuthHello expects: { id: hex, pubkeyHex, sign(bytes) }.
+    this._authIdentity = {
+      id:        this._identity.idHex,
+      pubkeyHex: this._identity.pubkeyHex,
+      sign:      (bytes) => edSign(this._identity.privateKey, bytes),
+    };
     this._log('identity-loaded', {
       nodeId: idToHex(this._identity.id),
       idHex:  this._identity.idHex,
@@ -183,6 +208,7 @@ export class BridgeAxonaNode {
    */
   handleConnClosed(connId) {
     this._helloByConnId.delete(connId);
+    this._serverNonceByConn.delete(connId);
     this._transport.handleConnClosed(connId);
   }
 
@@ -192,24 +218,22 @@ export class BridgeAxonaNode {
    * Browser replies with 'hello-ack' which our transport receives
    * via handleAxonaFrame; we then bindPeer + admit as Synapse.
    */
-  sendHello(connId) {
+  sendHello(connId, serverNonce) {
     if (this._helloByConnId.has(connId)) return;
     this._helloByConnId.set(connId, 'pending');
-    try {
-      this._sendToConn(connId, {
-        type: 'axona',
-        payload: {
-          k: 'ntf',
-          type: 'hello',
-          body: {
-            proto: 'axona/3',
-            nodeId: idToHex(this._identity.id),
-          },
-        },
-      });
-    } catch (err) {
-      this._log('hello-send-failed', { connId, err: err.message });
-    }
+    if (serverNonce) this._serverNonceByConn.set(connId, serverNonce);
+    const cbv = this._bridgeCbv(connId);
+    if (!cbv) { this._log('hello-no-cbv', { connId }); return; }
+    // Build our AUTHENTICATED hello, signed over the per-connection CBV.
+    buildAuthHello({ identity: this._authIdentity, cbv })
+      .then((hello) => {
+        try {
+          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
+        } catch (err) {
+          this._log('hello-send-failed', { connId, err: err.message });
+        }
+      })
+      .catch((err) => this._log('hello-build-failed', { connId, err: err.message }));
   }
 
   // ── Observability for server.js / healthz ─────────────────────────
@@ -232,33 +256,38 @@ export class BridgeAxonaNode {
     // STRING (the connId).  Post-bind they arrive as BigInt (the
     // peer's nodeId).  The orchestrator uses the type to decide.
 
-    t.onNotification('hello', (fromConnIdOrNodeId, body) => {
-      if (typeof fromConnIdOrNodeId !== 'string') return;
-      const peerNodeId = BigInt('0x' + body.nodeId);
-      this._completeHandshake(fromConnIdOrNodeId, peerNodeId);
-      // Reply with hello-ack.
-      try {
-        this._sendToConn(fromConnIdOrNodeId, {
-          type: 'axona',
-          payload: {
-            k: 'ntf',
-            type: 'hello-ack',
-            body: {
-              proto: 'axona/3',
-              nodeId: idToHex(this._identity.id),
-            },
-          },
-        });
-      } catch (err) {
-        this._log('hello-ack-failed', { err: err.message });
+    // axona/4 — verify the peer's authenticated hello/hello-ack before
+    // admitting it.  The peer must prove the nodeId it claims (pubkey
+    // hashes to the nodeId suffix + Ed25519 signature over this link's
+    // CBV).  A peer that can't — notably one still speaking the legacy
+    // axona/3 hello — is closed with 4426 so its kernel prints the
+    // upgrade-required console message.
+    const verifyPeerHello = async (connId, body, label) => {
+      if (typeof connId !== 'string') return;
+      const cbv = this._bridgeCbv(connId);
+      if (!cbv) { this._log('auth-no-cbv', { connId, label }); return; }
+      const res = await verifyAuthHello(body, { cbv });
+      if (!res.ok) {
+        this._log('auth-peer-rejected', { connId, label, reason: res.reason });
+        // Legacy / unauthenticatable peer → tell it to upgrade.
+        this._closeConn(connId, `upgrade required: this network speaks axona/4 (${res.reason})`);
+        return;
       }
-    });
+      const peerNodeId = BigInt('0x' + res.nodeId);
+      this._completeHandshake(connId, peerNodeId);
+      // On an inbound hello, reply with our own authenticated hello-ack.
+      if (label === 'hello') {
+        try {
+          const ack = await buildAuthHello({ identity: this._authIdentity, cbv });
+          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: ack } });
+        } catch (err) {
+          this._log('hello-ack-failed', { err: err.message });
+        }
+      }
+    };
 
-    t.onNotification('hello-ack', (fromConnIdOrNodeId, body) => {
-      if (typeof fromConnIdOrNodeId !== 'string') return;
-      const peerNodeId = BigInt('0x' + body.nodeId);
-      this._completeHandshake(fromConnIdOrNodeId, peerNodeId);
-    });
+    t.onNotification('hello',     (connId, body) => { verifyPeerHello(connId, body, 'hello'); });
+    t.onNotification('hello-ack', (connId, body) => { verifyPeerHello(connId, body, 'hello-ack'); });
 
     // NH-1 routing handlers ────────────────────────────────────────
 
