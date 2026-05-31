@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.5.0';
+const VERSION   = '2.5.1';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -83,6 +83,24 @@ const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.1.0';
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
+// ── Flag-day floors for the v2.9.0 envelope format (findings C-2/E-4) ──────
+// The signed-envelope format changed (per-publisher `seq` + freshness window +
+// signature domain separation), so a pre-2.9.0 client and a ≥2.9.0 client can't
+// verify each other's publishes — a hard flag-day.  Without a gate, an old
+// (often browser-CACHED) tab is admitted and then fails *silently* at the
+// envelope layer, which reads to the user as "my publish isn't delivered."
+// Reject it here instead, with a clear UPGRADE_REQUIRED (close 4426) that the
+// kernel surfaces to the user.
+//
+// Clients report `version` in TWO namespaces, so one threshold can't separate
+// them (2.9.0 < 3.9.0):
+//   - the kernel example/demo reports its KERNEL version → major 2.x
+//   - the axona.net peer app reports its APP   version   → major 3.x
+// Gate each namespace at the first build that vendors kernel ≥ 2.9.0:
+//   demo kernel 2.9.0  ·  peer app 3.14.0.  Both env-overridable.
+const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '2.9.0';
+const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.14.0';
+
 /** Three-component numeric semver compare; returns true iff a >= b. */
 function gteVersion(a, b) {
   const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
@@ -93,6 +111,16 @@ function gteVersion(a, b) {
     if (ai < bi) return false;
   }
   return true;
+}
+
+/** Select the flag-day floor for a reported client `version`, by its
+ *  major-version namespace (kernel-2.x vs peer-app-3.x).  Returns
+ *  `{ floor, ns }`.  Major ≥ 3 → peer-app namespace; otherwise kernel. */
+function flagDayFloor(version) {
+  const major = parseInt(String(version).split('.')[0], 10) || 0;
+  return major >= 3
+    ? { floor: MIN_PEER_APP_VERSION, ns: 'peer-app' }
+    : { floor: MIN_KERNEL_VERSION,   ns: 'kernel' };
 }
 const startTs   = Date.now();
 
@@ -281,7 +309,9 @@ const httpServer = http.createServer((req, res) => {
       connections:    connections.size,
       admitted:       admittedCount,
       pending:        pendingCount,
-      minPeerVersion: MIN_PEER_VERSION,
+      minPeerVersion:    MIN_PEER_VERSION,
+      minKernelVersion:  MIN_KERNEL_VERSION,
+      minPeerAppVersion: MIN_PEER_APP_VERSION,
       uptimeS:        Math.floor((Date.now() - startTs) / 1000),
       version:        VERSION,
       kernelVersion:  KERNEL_VERSION,
@@ -359,7 +389,9 @@ const httpServer = http.createServer((req, res) => {
     const body = JSON.stringify({
       version:        VERSION,
       kernelVersion:  KERNEL_VERSION,
-      minPeerVersion: MIN_PEER_VERSION,
+      minPeerVersion:    MIN_PEER_VERSION,
+      minKernelVersion:  MIN_KERNEL_VERSION,
+      minPeerAppVersion: MIN_PEER_APP_VERSION,
       bridge: {
         nodeId:        idToHex(bridgeNode.nodeId),
         region:        bridgeNode.identity.region.label,
@@ -538,18 +570,22 @@ wss.on('connection', (ws, req) => {
         } catch {}
         return;
       }
-      if (!gteVersion(peerVersion, MIN_PEER_VERSION)) {
+      // Two-stage gate: the absolute floor (MIN_PEER_VERSION) AND the
+      // namespace-aware flag-day floor for the v2.9.0 envelope (C-2/E-4).
+      const { floor, ns } = flagDayFloor(peerVersion);
+      if (!gteVersion(peerVersion, MIN_PEER_VERSION) || !gteVersion(peerVersion, floor)) {
         logErr('client-hello-too-old', {
-          connId: id, peerVersion, minPeerVersion: MIN_PEER_VERSION,
+          connId: id, peerVersion, ns, floor, minPeerVersion: MIN_PEER_VERSION,
         });
         try {
           ws.close(CLOSE_UPGRADE_REQUIRED,
-            `peer v${peerVersion} below minimum v${MIN_PEER_VERSION}`);
+            `peer v${peerVersion} below required v${floor} (${ns}); ` +
+            `reload axona.net / the demo to load the v2.9.0 build`);
         } catch {}
         return;
       }
       log('client-hello-admitted', {
-        connId: id, peerVersion, minPeerVersion: MIN_PEER_VERSION,
+        connId: id, peerVersion, ns, floor, minPeerVersion: MIN_PEER_VERSION,
       });
       admitConnection();
       return;
