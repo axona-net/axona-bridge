@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.5.1';
+const VERSION   = '2.5.2';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -572,15 +572,18 @@ wss.on('connection', (ws, req) => {
       }
       // Two-stage gate: the absolute floor (MIN_PEER_VERSION) AND the
       // namespace-aware flag-day floor for the v2.9.0 envelope (C-2/E-4).
+      // Report whichever bound actually binds (the higher of the two), so
+      // the close reason names the version the client must reach.
       const { floor, ns } = flagDayFloor(peerVersion);
+      const effectiveMin = gteVersion(floor, MIN_PEER_VERSION) ? floor : MIN_PEER_VERSION;
       if (!gteVersion(peerVersion, MIN_PEER_VERSION) || !gteVersion(peerVersion, floor)) {
         logErr('client-hello-too-old', {
-          connId: id, peerVersion, ns, floor, minPeerVersion: MIN_PEER_VERSION,
+          connId: id, peerVersion, ns, floor, minPeerVersion: MIN_PEER_VERSION, effectiveMin,
         });
         try {
           ws.close(CLOSE_UPGRADE_REQUIRED,
-            `peer v${peerVersion} below required v${floor} (${ns}); ` +
-            `reload axona.net / the demo to load the v2.9.0 build`);
+            `peer v${peerVersion} below minimum v${effectiveMin} (${ns}); ` +
+            `reload axona.net / the demo to upgrade`);
         } catch {}
         return;
       }
