@@ -1,24 +1,24 @@
 {
   "name": "axona-bridge",
-  "version": "2.4.0",
+  "version": "2.4.1",
   "private": true,
   "description": "Axona Phase 3 — WebSocket bridge: signaling relay + embedded highway peer (Axona DHT participant)",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "start":        "node src/server.js",
-    "dev":          "node --watch src/server.js",
-    "smoke":        "node scripts/smoke-client.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "smoke": "node scripts/smoke-client.js",
     "smoke:signal": "node scripts/signal-smoke.js",
-    "smoke:axona":  "node scripts/smoke-axona.js",
+    "smoke:axona": "node scripts/smoke-axona.js",
     "smoke:pubsub": "node scripts/smoke-pubsub-relay.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "ws": "^8.18.0",
-    "@axona/protocol": "github:axona-net/axona-protocol#v2.4.0"
+    "@axona/protocol": "github:axona-net/axona-protocol#v2.8.1",
+    "ws": "^8.18.0"
   },
   "license": "MIT"
 }
