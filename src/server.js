@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.8.0';
+const VERSION   = '2.9.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -741,11 +741,34 @@ httpServer.listen(PORT, () => {
 
 // ── Graceful shutdown ────────────────────────────────────────────────
 let shuttingDown = false;
-function shutdown(signal) {
+async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log('shutdown-begin', { signal, connections: connections.size });
   clearInterval(idleSweepTimer);
+
+  // Graceful departure (kernel ≥2.13.0).  The bridge is super-central —
+  // in every peer's synaptome and XOR-close to every us-east/* topic, so
+  // it's a root axon for most topics.  A hard `systemctl restart` drops
+  // all sockets at once and wipes those in-memory roots; peers only
+  // re-anchor on their next refreshTick (≤10 s), which is when pub/sub
+  // visibly stalls mesh-wide.  Announcing `peer-leaving` over the
+  // still-open sockets first lets every peer evict the bridge and
+  // re-anchor their subscriptions/roles immediately — a proactive
+  // sub-second handoff instead of a reactive stall.  Bounded so a slow
+  // or dead peer can't wedge the shutdown.
+  try {
+    const peer = bridgeNode?.peer;
+    if (peer && typeof peer.leave === 'function') {
+      await Promise.race([
+        peer.leave({ drain: true, notify: true, timeoutMs: 1000 }),
+        new Promise(resolve => setTimeout(resolve, 1500)),
+      ]);
+      log('shutdown-peer-left', {});
+    }
+  } catch (err) {
+    logErr('shutdown-peer-leave-failed', { err: err.message });
+  }
 
   for (const [id, { ws }] of connections) {
     try { ws.close(1001, 'server shutting down'); }
