@@ -241,13 +241,20 @@ steps above where noted). The first two also affect the **production** flag-day.
    sed -i 's/# ssl_certificate/ssl_certificate/g' /etc/nginx/sites-available/axona-bridge
    nginx -t && systemctl start nginx
    ```
-   Since this used `certonly` (not `--nginx`), add a renewal deploy-hook so the
-   renewed cert is actually loaded:
+   Then add a renewal deploy-hook to reload nginx, AND switch the cert's renewal
+   authenticator from `standalone` to `nginx` — otherwise renewal fails forever
+   (standalone can't bind port 80 while nginx holds it; `certbot renew --dry-run`
+   catches this). The `--nginx` switch works now that the cert exists and the
+   config is valid:
    ```bash
    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
    printf '#!/bin/sh\nsystemctl reload nginx\n' \
      > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
    chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+   # re-issue via the nginx authenticator → rewrites renewal to authenticator=nginx
+   certbot certonly --nginx -d testnet.axona.net --cert-name testnet.axona.net --force-renewal
+   systemctl reload nginx
+   certbot renew --dry-run   # must end: "all simulated renewals succeeded"
    ```
 4. **Restart coturn after writing its config.** The package auto-starts coturn
    at install with the default config; `systemctl enable --now` won't restart an
