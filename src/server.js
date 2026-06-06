@@ -45,7 +45,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.12.0';
+const VERSION   = '2.13.0';
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
@@ -98,8 +98,22 @@ const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 //   - the axona.net peer app reports its APP   version   → major 3.x
 // Gate each namespace at the first build that vendors kernel ≥ 2.9.0:
 //   demo kernel 2.9.0  ·  peer app 3.14.0.  Both env-overridable.
-const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '2.9.0';
-const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.14.0';
+// 2026-06 NETWORK PARTITION flag-day. The kernel bumped AUTH_PROTO axona/4→5 and
+// WIRE_VERSION 1.0→2.0, so a pre-bump (kernel ≤2.16) node can NEVER form an
+// authenticated channel with a post-bump node — the partition is hermetic at the
+// auth layer. These floors make the refusal happen cleanly at admission with a
+// clear UPGRADE_REQUIRED instead of a silent post-admit auth failure: gate each
+// namespace at the first build that vendors kernel ≥ 2.28.0 (demo kernel 2.28.0
+// · peer app 3.15.0). Both env-overridable for staged rollout / rollback.
+const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '2.28.0';
+const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.15.0';
+
+// Wire-format major the new network speaks (kernel WIRE_VERSION '2.0'). The
+// client-hello now carries `wireVersion`; the gate rejects any peer whose major
+// differs — OR (pre-flag-day peers) that omits it entirely — so only new-network
+// peers are admitted. Bridge-local (NOT the vendored kernel's WIRE_VERSION) so
+// it stays correct even before the bridge re-vendors. Env-overridable.
+const REQUIRED_WIRE_MAJOR  = process.env.REQUIRED_WIRE_MAJOR  ?? '2';
 
 /** Three-component numeric semver compare; returns true iff a >= b. */
 function gteVersion(a, b) {
@@ -567,6 +581,25 @@ wss.on('connection', (ws, req) => {
         try {
           ws.close(CLOSE_UPGRADE_REQUIRED,
             `client-hello must include 'version' (min v${MIN_PEER_VERSION})`);
+        } catch {}
+        return;
+      }
+      // Wire-format major gate (2026-06 partition). The new network speaks
+      // wire major REQUIRED_WIRE_MAJOR; a peer that sends a different major — or
+      // (a pre-flag-day peer) omits wireVersion entirely — belongs to the old
+      // network and is refused here, before any frame is relayed. This is the
+      // clean early half of the partition; the auth-proto bump is the hermetic
+      // backstop even if a peer reaches the channel layer.
+      const peerWireMajor = (typeof msg.wireVersion === 'string')
+        ? msg.wireVersion.split('.')[0] : null;
+      if (peerWireMajor !== REQUIRED_WIRE_MAJOR) {
+        logErr('client-hello-wire-mismatch', {
+          connId: id, peerVersion, peerWire: msg.wireVersion ?? null, requiredMajor: REQUIRED_WIRE_MAJOR,
+        });
+        try {
+          ws.close(CLOSE_UPGRADE_REQUIRED,
+            `wire ${msg.wireVersion ?? 'legacy'} incompatible (need major ${REQUIRED_WIRE_MAJOR}); ` +
+            `reload axona.net / the demo to upgrade`);
         } catch {}
         return;
       }
