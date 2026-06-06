@@ -115,6 +115,83 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d testnet-bridge.axona.net
 ```
 
+## 4b. TURN relay — self-hosted coturn (optional)
+
+The bridge does **not** run TURN; it mints short-lived coturn `use-auth-secret`
+credentials and hands them to peers in the `welcome` (only when
+`TURN_AUTH_SECRET` is set — otherwise peers run STUN-only). So "adding TURN"
+means standing up a coturn server that shares the same secret. Simplest for an
+isolated testnet: run coturn on this same droplet.
+
+```bash
+sudo apt -y install coturn
+sudo sed -i 's/^#TURNSERVER_ENABLED=1/TURNSERVER_ENABLED=1/' /etc/default/coturn
+
+# One shared secret — the SAME value goes in coturn AND the bridge env.
+SECRET=$(openssl rand -hex 32); echo "$SECRET"
+```
+
+`/etc/turnserver.conf` (replace `<PUBLIC_IP>` with the droplet's public IPv4):
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+use-auth-secret
+static-auth-secret=<SECRET>          # == bridge TURN_AUTH_SECRET
+realm=testnet-bridge.axona.net
+listening-ip=0.0.0.0
+external-ip=<PUBLIC_IP>
+min-port=49152
+max-port=65535
+no-cli
+no-tlsv1
+no-tlsv1_1
+# turns:// (TLS) reuses the Let's Encrypt cert from step 5's certbot run:
+cert=/etc/letsencrypt/live/testnet-bridge.axona.net/fullchain.pem
+pkey=/etc/letsencrypt/live/testnet-bridge.axona.net/privkey.pem
+```
+
+```bash
+sudo systemctl enable --now coturn
+```
+
+Open the firewall (DO cloud firewall and/or ufw) — TURN needs the control
+ports **and** the relay range:
+
+```bash
+sudo ufw allow 3478/udp && sudo ufw allow 3478/tcp
+sudo ufw allow 5349/tcp                      # turns (TLS)
+sudo ufw allow 49152:65535/udp               # relay range
+```
+
+Then add to `/etc/axona-bridge.env` (the secret MUST match coturn's) and restart:
+
+```ini
+TURN_AUTH_SECRET=<SECRET>
+TURN_URLS=turn:testnet-bridge.axona.net:3478,turns:testnet-bridge.axona.net:5349
+```
+
+```bash
+sudo systemctl restart axona-bridge
+```
+
+Sanity-check the credential scheme without a browser — reproduce exactly what the
+bridge mints (`username = <expiry>:<peerId>`, `credential =
+base64(HMAC-SHA1(secret, username))`) and allocate against coturn:
+
+```bash
+EXPIRY=$(( $(date +%s) + 3600 )); USER="$EXPIRY:test"
+CRED=$(printf '%s' "$USER" | openssl dgst -sha1 -hmac "$SECRET" -binary | base64)
+turnutils_uclient -y -u "$USER" -w "$CRED" -p 3478 testnet-bridge.axona.net
+# success → allocation lines; auth failure → the secret/scheme don't match.
+```
+
+> Alternative (not recommended for isolation): point `TURN_URLS` at an existing
+> relay (e.g. prod's `turn.axona.net`) using that relay's secret. Works, but
+> shares relay infra with production and means handling prod's secret.
+> Self-hosting keeps the testnet clean.
+
 ## 5. Verify
 
 ```bash
