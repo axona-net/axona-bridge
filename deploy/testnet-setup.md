@@ -91,7 +91,7 @@ BRIDGE_IDENTITY_PATH=/opt/axona-bridge/identity.testnet.json
 # TURN_URLS=turn:<your-turn-host>:3478
 
 # Partition floors ship as the build's defaults (REQUIRED_WIRE_MAJOR=2,
-# MIN_KERNEL_VERSION=2.28.0, MIN_PEER_APP_VERSION=3.15.0). Override here
+# MIN_KERNEL_VERSION=2.28.0, MIN_PEER_APP_VERSION=3.25.0). Override here
 # only to loosen the gate for a mixed-version experiment.
 ```
 
@@ -202,7 +202,7 @@ curl https://testnet.axona.net/healthz
 
 ## 6. Point a test client at it
 
-Run a 2.28.0 / app-3.15.0 build with `bridgeUrl = wss://testnet.axona.net`
+Run a 2.28.0 / app-3.25.0 build with `bridgeUrl = wss://testnet.axona.net`
 (a local/preview axona-peer build, or a separate testnet app deploy). Confirm:
 two test clients form the mesh; a current production (2.16.0) client is **refused
 at the gate** (`4426`), proving the partition.

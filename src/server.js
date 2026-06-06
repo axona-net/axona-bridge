@@ -103,10 +103,12 @@ const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 // authenticated channel with a post-bump node — the partition is hermetic at the
 // auth layer. These floors make the refusal happen cleanly at admission with a
 // clear UPGRADE_REQUIRED instead of a silent post-admit auth failure: gate each
-// namespace at the first build that vendors kernel ≥ 2.28.0 (demo kernel 2.28.0
-// · peer app 3.15.0). Both env-overridable for staged rollout / rollback.
+// namespace at the first build that vendors kernel ≥ 2.28.0: demo kernel 2.28.0,
+// and peer app 3.25.0 (the post-partition release — one bump above the deployed
+// 3.24.0, so every pre-partition app is below the floor). Both env-overridable
+// for staged rollout / rollback.
 const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '2.28.0';
-const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.15.0';
+const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.25.0';
 
 // Wire-format major the new network speaks (kernel WIRE_VERSION '2.0'). The
 // client-hello now carries `wireVersion`; the gate rejects any peer whose major
