@@ -30,6 +30,14 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=axona-bridge
 
+# Persistent state (the bridge's identity keypair). ProtectSystem=strict makes
+# the rest of the filesystem read-only, so the bridge cannot write its identity
+# into /opt; StateDirectory gives it a writable, service-owned dir at
+# /var/lib/axona-bridge. Point BRIDGE_IDENTITY_PATH there
+# (=/var/lib/axona-bridge/identity*.json) so the nodeId is stable across
+# restarts. Created + chowned to the service user automatically.
+StateDirectory=axona-bridge
+
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict
