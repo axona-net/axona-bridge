@@ -7,7 +7,7 @@ Identical in setup to the production droplet (`bridge.axona.net`, NYC) except:
 | | production | SF testnet |
 |---|---|---|
 | region | NYC | **SFO3** |
-| hostname | `bridge.axona.net` | **`testnet-bridge.axona.net`** (pick your own) |
+| hostname | `bridge.axona.net` | **`testnet.axona.net`** (pick your own) |
 | build | `main` (kernel 2.16.0) | **`release/2.28.0`** (kernel 2.28.0) |
 | node geo | 38.00, −77.00 (us-east) | **37.77, −122.42 (us-west)** |
 | TURN secret / identity | production's | **its own** (never reuse prod's) |
@@ -47,8 +47,8 @@ Host axona-bridge-sf
 
 ## 1. DNS  (you)
 
-Add an **A record**: `testnet-bridge.axona.net → <NEW_DROPLET_IPV4>`.
-Wait for it to resolve (`dig +short testnet-bridge.axona.net`) before certbot.
+Add an **A record**: `testnet.axona.net → <NEW_DROPLET_IPV4>`.
+Wait for it to resolve (`dig +short testnet.axona.net`) before certbot.
 
 ## 2. One-time droplet setup  (on the droplet)
 
@@ -107,12 +107,12 @@ sudo systemctl status axona-bridge
 ```bash
 sudo cp deploy/nginx-axona-bridge.conf /etc/nginx/sites-available/axona-bridge
 # point it at the testnet hostname:
-sudo sed -i 's/bridge\.axona\.net/testnet-bridge.axona.net/g' \
+sudo sed -i 's/bridge\.axona\.net/testnet.axona.net/g' \
   /etc/nginx/sites-available/axona-bridge
 sudo ln -s /etc/nginx/sites-available/axona-bridge /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d testnet-bridge.axona.net
+sudo certbot --nginx -d testnet.axona.net
 ```
 
 ## 4b. TURN relay — self-hosted coturn (optional)
@@ -139,7 +139,7 @@ tls-listening-port=5349
 fingerprint
 use-auth-secret
 static-auth-secret=<SECRET>          # == bridge TURN_AUTH_SECRET
-realm=testnet-bridge.axona.net
+realm=testnet.axona.net
 listening-ip=0.0.0.0
 external-ip=<PUBLIC_IP>
 min-port=49152
@@ -148,8 +148,8 @@ no-cli
 no-tlsv1
 no-tlsv1_1
 # turns:// (TLS) reuses the Let's Encrypt cert from step 5's certbot run:
-cert=/etc/letsencrypt/live/testnet-bridge.axona.net/fullchain.pem
-pkey=/etc/letsencrypt/live/testnet-bridge.axona.net/privkey.pem
+cert=/etc/letsencrypt/live/testnet.axona.net/fullchain.pem
+pkey=/etc/letsencrypt/live/testnet.axona.net/privkey.pem
 ```
 
 ```bash
@@ -169,7 +169,7 @@ Then add to `/etc/axona-bridge.env` (the secret MUST match coturn's) and restart
 
 ```ini
 TURN_AUTH_SECRET=<SECRET>
-TURN_URLS=turn:testnet-bridge.axona.net:3478,turns:testnet-bridge.axona.net:5349
+TURN_URLS=turn:testnet.axona.net:3478,turns:testnet.axona.net:5349
 ```
 
 ```bash
@@ -183,7 +183,7 @@ base64(HMAC-SHA1(secret, username))`) and allocate against coturn:
 ```bash
 EXPIRY=$(( $(date +%s) + 3600 )); USER="$EXPIRY:test"
 CRED=$(printf '%s' "$USER" | openssl dgst -sha1 -hmac "$SECRET" -binary | base64)
-turnutils_uclient -y -u "$USER" -w "$CRED" -p 3478 testnet-bridge.axona.net
+turnutils_uclient -y -u "$USER" -w "$CRED" -p 3478 testnet.axona.net
 # success → allocation lines; auth failure → the secret/scheme don't match.
 ```
 
@@ -195,14 +195,14 @@ turnutils_uclient -y -u "$USER" -w "$CRED" -p 3478 testnet-bridge.axona.net
 ## 5. Verify
 
 ```bash
-curl https://testnet-bridge.axona.net/healthz
+curl https://testnet.axona.net/healthz
 # expect: "kernelVersion":"2.28.0", "version":"2.13.0",
 #         "minKernelVersion":"2.28.0", "region":"testnet-sf (37.77, -122.42)"
 ```
 
 ## 6. Point a test client at it
 
-Run a 2.28.0 / app-3.15.0 build with `bridgeUrl = wss://testnet-bridge.axona.net`
+Run a 2.28.0 / app-3.15.0 build with `bridgeUrl = wss://testnet.axona.net`
 (a local/preview axona-peer build, or a separate testnet app deploy). Confirm:
 two test clients form the mesh; a current production (2.16.0) client is **refused
 at the gate** (`4426`), proving the partition.
@@ -215,3 +215,46 @@ sudo -u axona git pull            # stays on release/2.28.0
 sudo -u axona npm ci --omit=dev
 sudo systemctl restart axona-bridge
 ```
+
+## Corrections applied during the live SF bring-up
+
+Real snags hit deploying `testnet.axona.net` — apply these (they supersede the
+steps above where noted). The first two also affect the **production** flag-day.
+
+1. **`npm ci` needs a home for the service user.** `useradd --no-create-home`
+   leaves `/home/axona` absent, so npm's cache write fails (`EACCES`). Before
+   step 3's `npm ci`:
+   ```bash
+   mkdir -p /home/axona && chown axona:axona /home/axona
+   ```
+2. **Regenerate the lockfile when bumping the kernel pin (PROD-CRITICAL).**
+   Bumping `package.json` to `#v2.28.0` without updating `package-lock.json`
+   makes `npm ci` silently install the OLD kernel (the lock wins). Fixed on this
+   branch; for any future bump: `rm -f package-lock.json && npm install
+   --omit=dev`, verify the lock resolves the new version, commit it.
+3. **certbot `--nginx` can't run against this template** (its `listen 443 ssl`
+   block ships with the cert lines commented → `nginx -t` fails). Use
+   `certonly --standalone`, then uncomment the cert lines:
+   ```bash
+   systemctl stop nginx
+   certbot certonly --standalone -d testnet.axona.net
+   sed -i 's/# ssl_certificate/ssl_certificate/g' /etc/nginx/sites-available/axona-bridge
+   nginx -t && systemctl start nginx
+   ```
+   Since this used `certonly` (not `--nginx`), add a renewal deploy-hook so the
+   renewed cert is actually loaded:
+   ```bash
+   mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+   printf '#!/bin/sh\nsystemctl reload nginx\n' \
+     > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+   chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
+   ```
+4. **Restart coturn after writing its config.** The package auto-starts coturn
+   at install with the default config; `systemctl enable --now` won't restart an
+   already-running unit, so `/etc/turnserver.conf` isn't loaded until an explicit
+   `systemctl restart coturn`. Verify with a NEGATIVE test (a bogus credential
+   MUST return `401`/allocation-refused — else coturn is an open relay).
+5. **Firewall.** The raw bridge port (8080) is world-reachable by default. Use a
+   DO **cloud firewall** allowing only inbound 22 / 80 / 443 / 3478(tcp+udp) /
+   49152–65535(udp) — that drops 8080 automatically. (If using host `ufw`,
+   allow `OpenSSH` first to avoid lockout.)
