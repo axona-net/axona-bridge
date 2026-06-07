@@ -2,15 +2,16 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-The bridge speaks the Axona protocol as of **v0.5.0**. It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap (256), routable target for any browser peer's lookups.
+**v2.14.0**, embedding kernel **v2.31.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
 
-| Phase | Role of bridge |
-|---|---|
-| 1 | Single-peer connectivity test (`ping` → `pong` only) |
-| 2 | Signaling: `peer-list`, `peer-joined`, `peer-left`, opaque `signal` relay |
-| **3** (current) | Axona protocol participant: persistent nodeId, hello/hello-ack handshake on each browser connection, NH-1 routing primitives over WebSocket, `/healthz` reports nodeId + synaptome size |
+What the bridge does today:
 
-The Axona wire frames piggyback on the existing browser ↔ bridge WebSocket as `{type: 'axona', payload: <req/res/ntf frame>}`. No `node-webrtc` dependency.
+- **Signaling.** `peer-list`, `peer-joined`, `peer-left`, and opaque `signal` relay so peers can negotiate WebRTC DataChannels. After the channel opens they talk directly; the bridge is no longer in the data path. It also relays **mesh signaling** so peers can form *bridgeless* links through each other.
+- **Authenticated admission + version gate.** Every connection runs the kernel's `axona/5` authenticated handshake. A `client-hello` is checked against `REQUIRED_WIRE_MAJOR` (=2) and a `flagDayFloor()` (kernel-namespace floor `MIN_KERNEL_VERSION` for 2.x, peer-app floor `MIN_PEER_APP_VERSION` for ≥3.x); a peer below the floor or on the wrong wire epoch is closed with **4426** (`upgrade required`). The `axona/4` production network and the `axona/5` testnet are partitioned by design.
+- **Embedded protocol participant.** Persistent nodeId, NH-1 routing primitives over WebSocket, pub/sub root. `/healthz` and `/diag` surface the bridge nodeId, synaptome size, and the embedded **kernel version**.
+- **TURN credential minting.** Hands browsers short-lived TURN credentials (the `draft-uberti-rtcweb-turn-rest` scheme, validated by self-hosted **coturn** in `use-auth-secret` mode) so WebRTC works across restrictive NATs.
+
+The Axona wire frames piggyback on the browser ↔ bridge WebSocket as `{type: 'axona', payload: <req/res/ntf frame>}`. No `node-webrtc` dependency.
 
 Configure the bridge's geographic prefix via env vars:
 
@@ -25,25 +26,25 @@ Identity persists in `bridge-identity.json` (override path with `BRIDGE_IDENTITY
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"0.2.0"}
+# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.14.0"}
 ```
 
-Two smoke tests:
+Smoke tests:
 
 ```bash
 npm run smoke
-#   single client × N pings; sanity test of Phase 1 ping/pong path.
+#   single client × N pings; sanity test of the ping/pong path.
 
 npm run smoke:signal
 #   two simulated clients exercising welcome / peer-list / peer-joined /
 #   bidirectional signal relay / peer-left.
 ```
 
-Quick health check:
+Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"0.2.0"}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.14.0","kernelVersion":"2.31.0",…}
 ```
 
 ## Wire format
@@ -115,6 +116,14 @@ Env vars (see `.env.example`):
 |---|---|---|
 | `PORT` | `8080` | TCP port to listen on |
 | `LOG_LEVEL` | `info` | `debug` logs every ping/pong and signal relay (verbose) |
+| `REQUIRED_WIRE_MAJOR` | `2` | reject any `client-hello` not on this wire major (the `axona/5` epoch is major 2) |
+| `MIN_KERNEL_VERSION` | `2.28.0` | floor for kernel-namespace (2.x) peers; below → close 4426 |
+| `MIN_PEER_APP_VERSION` | `3.25.0` | floor for peer-app-namespace (≥3.x) peers |
+| `HELLO_TIMEOUT_MS` | — | how long to wait for a peer's authenticated hello before dropping |
+| `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
+| `TURN_AUTH_SECRET` | — | shared secret for minting `use-auth-secret` TURN credentials (also read by coturn) |
+| `BRIDGE_LAT` / `BRIDGE_LNG` / `BRIDGE_REGION_LABEL` | — | the bridge's geographic anchor (sets its S2 region prefix) |
+| `BRIDGE_IDENTITY_PATH` | `bridge-identity.json` | where the persistent Ed25519 identity is stored |
 
 ## Logging
 
@@ -136,22 +145,34 @@ systemd captures stdout/stderr; tail with `journalctl -u axona-bridge -f`.
 
 ```
 axona-bridge/
-├── src/server.js              # the bridge
+├── src/
+│   ├── server.js              # the bridge: WS host, version gate, signaling, TURN minting
+│   ├── bridge_engine.js       # embedded AxonaPeer wiring (highway node, pub/sub root)
+│   ├── bridge_axona_node.js   # the embedded protocol node
+│   ├── ws_transport.js        # kernel Transport over the browser WebSocket
+│   └── identity.js            # persistent Ed25519 identity (region-anchored)
 ├── scripts/
-│   ├── smoke-client.js        # Phase 1 ping/pong smoke test
-│   └── signal-smoke.js        # Phase 2 signaling smoke test
+│   ├── smoke-client.js        # ping/pong smoke test
+│   └── signal-smoke.js        # signaling smoke test
 ├── deploy/
 │   ├── axona-bridge.service   # systemd unit
-│   ├── nginx-axona-bridge.conf # nginx reverse proxy + TLS
+│   ├── nginx-axona-bridge.conf  # production reverse proxy + TLS
+│   ├── nginx-testnet-app.conf   # testnet.axona.net (peer app + same-origin bridge)
+│   ├── nginx-testnet-demo.conf  # demo-testnet.axona.net (kernel demo at root)
+│   ├── testnet-setup.md         # SF testnet droplet + coturn setup
 │   └── README.md              # one-time droplet setup
+├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.31.0)
 ├── .env.example
 ├── package.json
 └── README.md
 ```
 
+The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#v2.31.0`; bump that tag and regenerate `package-lock.json` (the lock must track the pin) when moving the bridge to a new kernel.
+
 ## Deployment
 
-See `deploy/README.md` for the Digital Ocean / Ubuntu 24.04 procedure. The deployment artifacts are unchanged from Phase 1 — the bridge process serves both phases from the same binary.
+- **Production** (`bridge.axona.net`, `turn.axona.net`): see `deploy/README.md` for the DigitalOcean / Ubuntu procedure (systemd + nginx TLS + coturn). Still on the `axona/4` kernel-2.16 network until the flag-day cutover.
+- **SF testnet** (`testnet.axona.net` peer + same-origin bridge; `demo-testnet.axona.net` demo): see `deploy/testnet-setup.md`. Runs this `axona/5` line with self-hosted coturn.
 
 ## License
 
