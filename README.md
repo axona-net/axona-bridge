@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.14.0**, embedding kernel **v2.31.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
+**v2.15.0**, embedding kernel **v2.32.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
 
 What the bridge does today:
 
@@ -26,7 +26,7 @@ Identity persists in `bridge-identity.json` (override path with `BRIDGE_IDENTITY
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.14.0"}
+# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.15.0"}
 ```
 
 Smoke tests:
@@ -44,7 +44,7 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"2.14.0","kernelVersion":"2.31.0",…}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.15.0","kernelVersion":"2.32.0",…}
 ```
 
 ## Wire format
@@ -161,7 +161,7 @@ axona-bridge/
 │   ├── nginx-testnet-demo.conf  # demo-testnet.axona.net (kernel demo at root)
 │   ├── testnet-setup.md         # SF testnet droplet + coturn setup
 │   └── README.md              # one-time droplet setup
-├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.31.0)
+├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.32.0)
 ├── .env.example
 ├── package.json
 └── README.md
