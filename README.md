@@ -171,7 +171,7 @@ The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#v2.31
 
 ## Deployment
 
-- **Production** (`bridge.axona.net`, `turn.axona.net`): see `deploy/README.md` for the DigitalOcean / Ubuntu procedure (systemd + nginx TLS + coturn). Still on the `axona/4` kernel-2.16 network until the flag-day cutover.
+- **Production** (`bridge.axona.net`, `turn.axona.net`): see `deploy/README.md` for the DigitalOcean / Ubuntu procedure (systemd + nginx TLS + coturn). On the `axona/5` / kernel-2.32 line since the 2026-06-08 flag-day cutover (bridge 2.15.0).
 - **SF testnet** (`testnet.axona.net` peer + same-origin bridge; `demo-testnet.axona.net` demo): see `deploy/testnet-setup.md`. Runs this `axona/5` line with self-hosted coturn.
 
 ## License
