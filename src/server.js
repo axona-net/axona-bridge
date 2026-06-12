@@ -41,11 +41,15 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import http   from 'http';
 
+import { readFileSync }    from 'node:fs';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
-const VERSION   = '2.19.0';
+// Derive from package.json so /healthz never drifts from the deployed build
+// (the hardcoded literal lagged twice — showed 2.18.0 then 2.19.0 while
+// package.json was already a version ahead).
+const VERSION   = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
