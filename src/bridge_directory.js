@@ -61,8 +61,17 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     }
   }
 
-  // Publish once on launch, then keep the entry fresh once a day.
-  publish('launch');
+  // HOST the directory topic first, so the bridge is a durable root for it
+  // and stores+serves its own entry — even the launch publish (which lands
+  // before peers reconnect) is then retrievable by any later subscriber that
+  // routes to the bridge (it's in every peer's synaptome). Without this the
+  // launch publish would route into an empty mesh and be lost as the real
+  // 0x00-closest roots fill in. Best-effort.
+  (async () => {
+    try { await peer.host(BRIDGE_DIRECTORY_TOPIC, { publisher: null }); log('hosting', {}); }
+    catch (err) { log('host-failed', { err: err?.message }); }
+    await publish('launch');
+  })();
   const timer = setInterval(() => publish('daily'), DAY_MS);
   if (typeof timer.unref === 'function') timer.unref();   // don't keep the process alive
 
