@@ -84,6 +84,12 @@ BRIDGE_REGION_LABEL=testnet-sf
 # Its OWN persistent identity keypair — do NOT copy prod's.
 BRIDGE_IDENTITY_PATH=/opt/axona-bridge/identity.testnet.json
 
+# Bridge directory: the testnet runs an INDEPENDENT fleet and must NOT advertise
+# itself into the public directory the production apps read. Opt out explicitly.
+# (Belt-and-suspenders: without BRIDGE_PUBLIC_URL the bridge skips publishing
+# anyway, but set this so an accidental BRIDGE_PUBLIC_URL can't leak it.)
+BRIDGE_DIRECTORY=off
+
 # Its OWN TURN secret (any fresh random string), or omit TURN_* entirely
 # to run STUN-only (fine for same-LAN / same-NAT testing; cross-NAT pairs
 # may need TURN). Never reuse the production TURN_AUTH_SECRET.
