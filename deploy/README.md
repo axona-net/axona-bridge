@@ -32,9 +32,13 @@ sudo -u axona npm ci --omit=dev
 
 # Environment
 sudo cp .env.example /etc/axona-bridge.env
-sudo $EDITOR /etc/axona-bridge.env   # set PORT, LOG_LEVEL
+sudo $EDITOR /etc/axona-bridge.env   # set PORT, LOG_LEVEL, BRIDGE_PUBLIC_URL
 sudo chmod 640 /etc/axona-bridge.env
 sudo chown root:axona /etc/axona-bridge.env
+# Bridge directory: set BRIDGE_PUBLIC_URL=wss://<this-bridge> so the bridge
+# advertises itself for client discovery/failover. The TESTNET bridge MUST
+# set BRIDGE_DIRECTORY=off (independent fleet — do not advertise it into the
+# public directory). Verify which mode is live via /healthz → directory.{enabled,url}.
 
 # systemd unit
 sudo cp deploy/axona-bridge.service /etc/systemd/system/

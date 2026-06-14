@@ -43,6 +43,7 @@ import http   from 'http';
 
 import { readFileSync }    from 'node:fs';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
+import { startDirectoryPublisher } from './bridge_directory.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
@@ -296,6 +297,17 @@ log('axona-ready', {
   region: bridgeNode.identity.region.label,
 });
 
+// ── Bridge directory (Phase: bridge discovery + failover) ────────────
+// Advertise this bridge's location on the public directory topic so
+// clients can discover it and fail over to it. The testnet bridge opts
+// out via BRIDGE_DIRECTORY=off (independent fleet).
+const directory = startDirectoryPublisher({
+  peer:     bridgeNode.peer,
+  identity: bridgeNode.identity,
+  version:  VERSION,
+  log:      (event, detail) => log(`directory:${event}`, detail),
+});
+
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
   // CORS — /healthz and /diag are read-only diagnostic endpoints that
@@ -339,6 +351,10 @@ const httpServer = http.createServer((req, res) => {
         nodeId:         idToHex(bridgeNode.nodeId),
         region:         bridgeNode.identity.region.label,
         synaptomeSize:  bridgeNode.getSynaptome().length,
+      },
+      directory: {
+        enabled: directory.enabled,
+        url:     directory.url,
       },
     });
     res.writeHead(200, {
@@ -785,6 +801,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   log('shutdown-begin', { signal, connections: connections.size });
   clearInterval(idleSweepTimer);
+  directory.stop();
 
   // Graceful departure (kernel ≥2.13.0).  The bridge is super-central —
   // in every peer's synaptome and XOR-close to every us-east/* topic, so
