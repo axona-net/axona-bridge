@@ -39,6 +39,15 @@ sudo chown root:axona /etc/axona-bridge.env
 # advertises itself for client discovery/failover. The TESTNET bridge MUST
 # set BRIDGE_DIRECTORY=off (independent fleet — do not advertise it into the
 # public directory). Verify which mode is live via /healthz → directory.{enabled,url}.
+#
+# Federation (v2.23.0+): when BRIDGE_DIRECTORY is on, the bridge also bootstraps
+# INTO the live mesh as a node — an OUTBOUND uplink to a known bridge — so its
+# directory entry is visible network-wide. This pulls in `node-datachannel` (a
+# native WebRTC module; `npm ci` installs a prebuilt for linux-x64). Optional
+# BRIDGE_UPSTREAMS=wss://a,wss://b overrides the seed list (self is excluded; a
+# bridge with nothing reachable runs uplink-less as the seed). /healthz →
+# uplink.{upstream,connected}. The first/root bridge can stay the seed
+# (uplink-less); it does NOT need the new code for others to federate onto it.
 
 # systemd unit
 sudo cp deploy/axona-bridge.service /etc/systemd/system/
