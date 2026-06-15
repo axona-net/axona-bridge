@@ -1,0 +1,12 @@
+node_modules
+.git
+.npm-cache
+*.log
+bridge-identity.json
+identity*.json
+bridges.json
+.env
+deploy/*.md
+README.md
+LICENSE
+scripts

@@ -2,7 +2,26 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.15.0**, embedding kernel **v2.32.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
+**v2.25.0**, embedding kernel **v2.43.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
+
+## Run your own bridge
+
+Anyone can run a bridge and have it join the public network — it makes the mesh
+more resilient and is safe to operate (a bridge only brokers signaling; it can't
+read or impersonate peer traffic). **[deploy/INSTALL.md](deploy/INSTALL.md)** is
+the operator manual. The fast path, on a fresh Ubuntu/Debian host:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/axona-net/axona-bridge/main/deploy/install.sh \
+  | sudo BRIDGE_DOMAIN=bridge.example.org LETSENCRYPT_EMAIL=you@example.org bash
+```
+
+That sets up the whole stack — Node service (systemd), nginx + Let's Encrypt
+TLS, and a **coturn TURN relay** (always deployed with a bridge) — and the
+bridge advertises itself in the directory and federates into the mesh. Prefer
+containers? `cp .env.docker.example .env && docker compose up -d --build`
+(Caddy auto-TLS + coturn). Both paths and a manual walkthrough are in
+[deploy/INSTALL.md](deploy/INSTALL.md).
 
 What the bridge does today:
 
@@ -155,13 +174,19 @@ axona-bridge/
 │   ├── smoke-client.js        # ping/pong smoke test
 │   └── signal-smoke.js        # signaling smoke test
 ├── deploy/
+│   ├── install.sh            # one-command installer (bridge + nginx/TLS + coturn + systemd)
+│   ├── INSTALL.md            # operator manual — start here to run your own bridge
 │   ├── axona-bridge.service   # systemd unit
 │   ├── nginx-axona-bridge.conf  # production reverse proxy + TLS
 │   ├── nginx-testnet-app.conf   # testnet.axona.net (peer app + same-origin bridge)
 │   ├── nginx-testnet-demo.conf  # demo-testnet.axona.net (kernel demo at root)
+│   ├── docker/Caddyfile        # auto-TLS reverse proxy for the Docker stack
 │   ├── testnet-setup.md         # SF testnet droplet + coturn setup
 │   └── README.md              # one-time droplet setup
-├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.32.0)
+├── Dockerfile                 # container image
+├── docker-compose.yml         # bridge + Caddy (auto-TLS) + coturn stack
+├── .env.docker.example        # Compose env template
+├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.43.0)
 ├── .env.example
 ├── package.json
 └── README.md
@@ -171,8 +196,9 @@ The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#v2.31
 
 ## Deployment
 
-- **Production** (`bridge.axona.net`, `turn.axona.net`): see `deploy/README.md` for the DigitalOcean / Ubuntu procedure (systemd + nginx TLS + coturn). On the `axona/5` / kernel-2.32 line since the 2026-06-08 flag-day cutover (bridge 2.15.0).
-- **SF testnet** (`testnet.axona.net` peer + same-origin bridge; `demo-testnet.axona.net` demo): see `deploy/testnet-setup.md`. Runs this `axona/5` line with self-hosted coturn.
+- **Run your own** — [`deploy/INSTALL.md`](deploy/INSTALL.md): the operator manual covering the one-command installer (`deploy/install.sh`), the Docker Compose stack (`docker-compose.yml`), and a manual walkthrough. This is the place to start.
+- **Production** (`bridge.axona.net` + `bridge-west.axona.net`): provisioned with `deploy/install.sh` / the procedure in `deploy/README.md` (systemd + nginx TLS + coturn). Federated; each advertises its TURN endpoint in the directory.
+- **SF testnet** (`testnet.axona.net`): see `deploy/testnet-setup.md`. Runs an isolated fleet with `BRIDGE_DIRECTORY=off`.
 
 ## License
 

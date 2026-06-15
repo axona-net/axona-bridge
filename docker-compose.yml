@@ -1,0 +1,73 @@
+# Axona bridge — full stack in three containers:
+#
+#   bridge  — the Node bridge (internal only; not published directly)
+#   caddy   — reverse proxy with AUTOMATIC HTTPS (Let's Encrypt) → wss://$DOMAIN
+#   coturn  — TURN relay on host networking (needs the UDP relay port range
+#             and the real client source IPs, which Docker's bridge net hides)
+#
+# Quick start (Linux Docker host; ports 80/443 free; DNS → this host):
+#   cp .env.docker.example .env
+#   $EDITOR .env            # set DOMAIN, PUBLIC_IP, TURN_AUTH_SECRET
+#   docker compose up -d --build
+#   curl https://$DOMAIN/healthz
+#
+# NOTE: coturn here serves turn:// (3478) only. turns:// (TLS) needs the cert
+# shared with coturn; on Docker the systemd/install.sh path (deploy/install.sh
+# with ENABLE_TURNS=1) is the simpler way to get turns://.
+
+services:
+  bridge:
+    build: .
+    image: axona-bridge
+    restart: unless-stopped
+    env_file: .env          # BRIDGE_PUBLIC_URL, BRIDGE_DIRECTORY, BRIDGE_LAT/LNG/REGION_LABEL, TURN_AUTH_SECRET, TURN_URLS, PORT, LOG_LEVEL
+    volumes:
+      - bridge-data:/data   # identity keypair + discovered bridges (stable nodeId across restarts)
+    networks: [edge]
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [bridge]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./deploy/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge]
+
+  coturn:
+    image: coturn/coturn:4.6.2
+    restart: unless-stopped
+    # Host networking: TURN must allocate from the full relay UDP range and
+    # observe real peer IPs. Docker's NAT'd bridge network breaks both.
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_AUTH_SECRET}
+      - --realm=${DOMAIN}
+      - --listening-ip=0.0.0.0
+      - --external-ip=${PUBLIC_IP}
+      - --min-port=49152
+      - --max-port=65535
+      - --no-cli
+      - --no-tlsv1
+      - --no-tlsv1_1
+
+networks:
+  edge:
+
+volumes:
+  bridge-data:
+  caddy-data:
+  caddy-config:

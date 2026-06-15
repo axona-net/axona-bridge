@@ -1,0 +1,8 @@
+# Caddy fronts the bridge with automatic HTTPS (Let's Encrypt / ZeroSSL).
+# Requires: ports 80 + 443 reachable, and DOMAIN's A record → this host.
+# WebSocket upgrades pass through transparently, so wss://$DOMAIN works.
+
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy bridge:8080
+}
