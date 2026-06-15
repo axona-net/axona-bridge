@@ -42,8 +42,10 @@ import crypto from 'crypto';
 import http   from 'http';
 
 import { readFileSync }    from 'node:fs';
+import { join as pathJoin } from 'node:path';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { startDirectoryPublisher } from './bridge_directory.js';
+import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
@@ -297,16 +299,44 @@ log('axona-ready', {
   region: bridgeNode.identity.region.label,
 });
 
-// ── Bridge directory (Phase: bridge discovery + failover) ────────────
-// Advertise this bridge's location on the public directory topic so
-// clients can discover it and fail over to it. The testnet bridge opts
-// out via BRIDGE_DIRECTORY=off (independent fleet).
+// ── Bridge directory + federation ────────────────────────────────────
+// Advertise this bridge on the public directory topic so clients discover it
+// and fail over to it, AND bootstrap this bridge INTO the live mesh as a node
+// (outbound uplink) so it's one shared connectome and the directory federates.
+// The testnet bridge opts out via BRIDGE_DIRECTORY=off (independent fleet).
+const DIRECTORY_ON = String(process.env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() !== 'off';
+const SELF_URL = process.env.BRIDGE_PUBLIC_URL || null;
+
+let bridgeBook = null;
+if (DIRECTORY_ON && SELF_URL) {
+  const bookPath = process.env.BRIDGE_BOOK_PATH
+    || (process.env.STATE_DIRECTORY ? pathJoin(process.env.STATE_DIRECTORY, 'bridges.json') : 'bridges.json');
+  bridgeBook = new BridgeBookStore({
+    path:    bookPath,
+    selfUrl: SELF_URL,
+    self:    { lat: bridgeNode.identity.region.lat, lng: bridgeNode.identity.region.lng },
+    log:     (event, detail) => log(`book:${event}`, detail),
+  });
+}
+
 const directory = startDirectoryPublisher({
   peer:     bridgeNode.peer,
   identity: bridgeNode.identity,
   version:  VERSION,
+  book:     bridgeBook,
   log:      (event, detail) => log(`directory:${event}`, detail),
 });
+
+// Bootstrap into the mesh as a node (non-fatal, background). Once the uplink
+// integrates, re-publish so this bridge's entry lands on the SHARED mesh.
+if (DIRECTORY_ON && SELF_URL) {
+  bridgeNode.startUplink({ book: bridgeBook, selfUrl: SELF_URL })
+    .then((upstream) => {
+      if (upstream) { log('uplink-up', { upstream }); directory.republish?.('post-uplink'); }
+      else          { log('uplink-none', { reason: 'no reachable upstream — running as seed' }); }
+    })
+    .catch((err) => logErr('uplink-failed', { err: err.message }));
+}
 
 // ── HTTP server: /healthz + WebSocket upgrade host ───────────────────
 const httpServer = http.createServer((req, res) => {
@@ -355,7 +385,9 @@ const httpServer = http.createServer((req, res) => {
       directory: {
         enabled: directory.enabled,
         url:     directory.url,
+        known:   bridgeBook ? bridgeBook.count : 0,
       },
+      uplink: bridgeNode.uplinkStatus(),
     });
     res.writeHead(200, {
       'Content-Type':   'application/json',

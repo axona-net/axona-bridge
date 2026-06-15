@@ -46,9 +46,13 @@ function clz64(x) {
   return 32 + Math.clz32(lo);
 }
 
+import { CompositeTransport } from '@axona/protocol/transport/web/composite.js';
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
+// NB: ./uplink.js (and its node-datachannel polyfill) is imported LAZILY inside
+// startUplink() so the native WebRTC module only loads when an uplink is actually
+// used — the testnet/uplink-off path never pays for it.
 // pubsub_axonal.js (legacy { msg, publisher } wrapper) retired in I4.
 // Bridge participates in pub/sub via the kernel's unified API on
 // AxonaPeer — peer.pub / peer.sub / peer.pull / peer.metrics.
@@ -72,7 +76,9 @@ export class BridgeAxonaNode {
     this._identity  = null;
     this._engine    = null;
     this._node      = null;
-    this._transport = null;
+    this._transport = null;   // inbound server WS (browser ↔ bridge); kept for feed methods
+    this._composite = null;   // node.transport = [server WS, (optional) outbound uplink]
+    this._uplink    = null;   // { transport, upstream } once the bootstrap uplink is up
     this._peer      = null;
 
     // axona/4 — signer adapter for the authenticated handshake (the
@@ -129,14 +135,23 @@ export class BridgeAxonaNode {
     this._node.temperature = this._engine.T_INIT;
     this._engine.setTheNode(this._node);
 
+    // Inbound server transport (browsers → bridge). Kept as `this._transport`
+    // for the bridge's feed methods (handleAxonaFrame/handleConnClosed) and the
+    // inbound NH1 admission handshake.
     this._transport = new WebSocketTransport({
       localNodeId: this._identity.id,
       sendToConn:  this._sendToConn,
       isConnOpen:  this._isConnOpen,
       log: this._log,
     });
-    this._node.transport = this._transport;
-    await this._transport.start(this._identity.id);
+
+    // `node.transport` is a CompositeTransport so the kernel's pub/sub + routing
+    // handlers fan across BOTH the inbound server WS and an OUTBOUND bootstrap
+    // uplink (added later by startUplink). One peer, one connectome.
+    this._composite = new CompositeTransport({ localNodeId: this._identity.id, log: this._log });
+    this._composite.addSubtransport(this._transport);
+    this._node.transport = this._composite;
+    await this._composite.start(this._identity.id);
 
     this._registerNH1Handlers();
 
@@ -187,10 +202,56 @@ export class BridgeAxonaNode {
     return this;
   }
 
+  /**
+   * Bootstrap this bridge INTO the live mesh as a node: open an outbound uplink
+   * to a known bridge (env ∪ persisted ∪ default seeds), integrate into the one
+   * shared connectome — so the bridge's directory publish becomes visible
+   * network-wide and clients on any bridge discover it. NON-FATAL: a failed or
+   * absent uplink (e.g. the root bridge with nothing above it) leaves the bridge
+   * running server-only. Returns the chosen upstream url, or null.
+   *
+   * @param {object} [o]
+   * @param {object} [o.env]
+   * @param {import('./bridge_book_store.js').BridgeBookStore|null} [o.book]
+   * @param {string} [o.selfUrl]  this bridge's advertised url (excluded from seeds)
+   */
+  async startUplink({ env = process.env, book = null, selfUrl = null } = {}) {
+    if (this._uplink) return this._uplink.upstream;          // idempotent
+    let built = null;
+    try {
+      const { buildUplink } = await import('./uplink.js');   // lazy: loads node-datachannel only now
+      built = await buildUplink({
+        identity: this._identity, env, book, selfUrl,
+        log: (event, ctx) => this._log(`uplink:${event}`, ctx),
+      });
+    } catch (err) {
+      this._log('uplink-build-failed', { err: err?.message });
+      return null;
+    }
+    if (!built) return null;
+    try {
+      await built.transport.start();                         // upstream handshake
+      this._composite.addSubtransport(built.transport);      // fans existing handlers onto it
+      this._uplink = built;
+      this._log('uplink-up', { upstream: built.upstream });
+      return built.upstream;
+    } catch (err) {
+      this._log('uplink-start-failed', { upstream: built.upstream, err: err?.message });
+      try { await built.transport.stop?.(); } catch { /* dying */ }
+      return null;
+    }
+  }
+
+  /** Uplink status for /healthz. */
+  uplinkStatus() {
+    return { upstream: this._uplink?.upstream ?? null, connected: !!this._uplink };
+  }
+
   async stop() {
+    if (this._uplink)    { try { await this._uplink.transport.stop(); } catch { /* dying */ } }
     if (this._peer)      await this._peer.stop();
     if (this._transport) await this._transport.stop();
-    this._peer = this._transport = this._engine = this._node = null;
+    this._peer = this._transport = this._composite = this._uplink = this._engine = this._node = null;
   }
 
   // ── Public API: feed bridge events into the transport ─────────────
@@ -389,7 +450,9 @@ export class BridgeAxonaNode {
 
   /** Multi-hop routed dispatch (mirrors axona-peer/axona_node.js). */
   _registerRouteMsgHandler() {
-    const t = this._transport;
+    // Bind on the composite so routed messages arriving on EITHER the inbound
+    // server WS or the outbound uplink reach the router.
+    const t = this._node.transport;
     const peer = () => this._peer;
     t.onRequest('route_msg', async (_fromId, body) => {
       const { type, payload, targetId, originId } = body ?? {};

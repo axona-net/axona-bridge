@@ -25,10 +25,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * @param {object}  o.identity   bridge identity ({ region:{lat,lng,label} })
  * @param {string}  o.version    bridge version string
  * @param {object}  [o.env=process.env]
+ * @param {import('./bridge_book_store.js').BridgeBookStore|null} [o.book]
+ *        persist discovered bridges (the bridge learns the list like any node)
  * @param {(event:string, detail?:object)=>void} [o.log]
  * @returns {{ enabled:boolean, url:string|null, stop:()=>void }}
  */
-export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, log = () => {} }) {
+export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, book = null, log = () => {} }) {
   const off = String(env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() === 'off';
   if (off) {
     log('disabled', { reason: 'BRIDGE_DIRECTORY=off' });
@@ -67,13 +69,35 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
   // routes to the bridge (it's in every peer's synaptome). Without this the
   // launch publish would route into an empty mesh and be lost as the real
   // 0x00-closest roots fill in. Best-effort.
+  let sub = null;
   (async () => {
     try { await peer.host(BRIDGE_DIRECTORY_TOPIC, { publisher: null }); log('hosting', {}); }
     catch (err) { log('host-failed', { err: err?.message }); }
     await publish('launch');
+    // Subscribe to the directory and persist what we learn — a bridge keeps the
+    // list like any node, so it can bootstrap from saved bridges next launch.
+    if (book) {
+      try {
+        sub = await peer.sub(BRIDGE_DIRECTORY_TOPIC, (envp) => {
+          if (!envp || envp.deleted || !envp.signerPubkey) return;
+          if (envp.message?.url === url) return;          // skip our own entry
+          if (book.merge(envp.message, envp.signerPubkey)) {
+            log('learned', { url: envp.message?.url, known: book.count });
+          }
+        }, { publisher: null, since: 'all' });
+      } catch (err) { log('subscribe-failed', { err: err?.message }); }
+    }
   })();
   const timer = setInterval(() => publish('daily'), DAY_MS);
   if (typeof timer.unref === 'function') timer.unref();   // don't keep the process alive
 
-  return { enabled: true, url, stop() { clearInterval(timer); } };
+  return {
+    enabled: true,
+    url,
+    // Re-emit the entry — called once the bootstrap uplink integrates, so the
+    // entry lands on the SHARED mesh (the launch publish lands on the local
+    // mesh before the uplink is up).
+    republish: (reason = 'manual') => publish(reason),
+    stop() { clearInterval(timer); try { sub?.stop?.(); } catch { /* dying */ } },
+  };
 }
