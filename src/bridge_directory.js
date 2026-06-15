@@ -50,6 +50,7 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     lng:   region.lng,
     label: region.label ?? '',
     ver:   version,
+    turn:  env.TURN_URLS,          // advertise this bridge's TURN endpoint(s), if any
   });
 
   async function publish(reason) {
