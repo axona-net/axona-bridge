@@ -11,10 +11,12 @@ more resilient and is safe to operate (a bridge only brokers signaling; it can't
 read or impersonate peer traffic). This is deliberate: the bridge is the
 network's one semi-centralized touchpoint, so bridges **advertise themselves in
 the directory** and nodes **collect that list on launch** to turn that single
-point of failure into a moving target — no one address to block, automatic
-failover, and new bridges discovered without a client update. (It does *not* by
-itself stop bridge Sybil/false-advertising; client-side ranking bounds that —
-see [deploy/INSTALL.md](deploy/INSTALL.md).) **[deploy/INSTALL.md](deploy/INSTALL.md)**
+point of failure into a moving target — no single *fixed* address to block,
+automatic failover, and new bridges discovered without a client update. (Caveats,
+stated honestly: this defeats ad-hoc blocking, not a determined adversary who
+enumerates the whole fleet at once; and it does *not* by itself stop bridge
+Sybil/false-advertising — client-side ranking bounds that. See
+[deploy/INSTALL.md](deploy/INSTALL.md).) **[deploy/INSTALL.md](deploy/INSTALL.md)**
 is the operator manual. The fast path, on a fresh Ubuntu/Debian host:
 
 ```bash
