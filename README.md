@@ -8,8 +8,14 @@ WebSocket signaling broker for the [Axona](https://github.com/axona-net) protoco
 
 Anyone can run a bridge and have it join the public network — it makes the mesh
 more resilient and is safe to operate (a bridge only brokers signaling; it can't
-read or impersonate peer traffic). **[deploy/INSTALL.md](deploy/INSTALL.md)** is
-the operator manual. The fast path, on a fresh Ubuntu/Debian host:
+read or impersonate peer traffic). This is deliberate: the bridge is the
+network's one semi-centralized touchpoint, so bridges **advertise themselves in
+the directory** and nodes **collect that list on launch** to turn that single
+point of failure into a moving target — no one address to block, automatic
+failover, and new bridges discovered without a client update. (It does *not* by
+itself stop bridge Sybil/false-advertising; client-side ranking bounds that —
+see [deploy/INSTALL.md](deploy/INSTALL.md).) **[deploy/INSTALL.md](deploy/INSTALL.md)**
+is the operator manual. The fast path, on a fresh Ubuntu/Debian host:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/axona-net/axona-bridge/main/deploy/install.sh \

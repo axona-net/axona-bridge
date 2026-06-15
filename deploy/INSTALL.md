@@ -32,6 +32,47 @@ A bridge is **not** trusted with content or identity:
 So adding your bridge can only **help** the network — clients that discover it
 gain another way to get connected, and lose nothing if it misbehaves.
 
+### Why the directory exists — making the network hard to stop
+
+The bridge is the network's one semi-centralized touchpoint: browsers can't
+accept inbound connections, so a new peer needs *some* rendezvous to find the
+mesh. A single hard-coded bridge is therefore a single point of failure — block
+its domain or IP, or take down its host, and new peers can no longer bootstrap.
+
+The directory turns that single point into a **moving target**. Every bridge
+advertises its access point on a public topic; every node collects the current
+set on launch. So:
+
+- There's **no one address to block** — knock a bridge offline and clients
+  transparently fail over to others they've already learned.
+- **New bridges appear automatically** — stand one up anywhere and existing
+  clients discover it through the directory; you don't have to ship a new client.
+- Because every bridge also **federates into the mesh as a node**, the directory
+  lives *in the mesh itself* — there's no central registry to seize or shut down.
+
+That's the whole point: make the network **very difficult to stop even at its
+weakest point, the bridge.**
+
+### What the directory does *not* do
+
+The directory does **not**, by itself, prevent bridge **Sybil attacks** or
+**false advertising**. Anyone can sign and publish an entry for a bridge that
+doesn't exist, or flood the directory with many identities — the signature only
+proves a stable pseudonymous publisher, not that the endpoint is real or honest.
+
+What bounds the damage is the **client-side ranking**, not the directory itself:
+
+- a client **never auto-replaces** its configured/trusted primary — the
+  directory only ever *adds fallbacks*;
+- it prefers bridges it has **personally bootstrapped through** (its own
+  first-party, unforgeable observations), ranking unknown entries below those;
+- a fake or dead endpoint simply **fails on connect and sinks** to last resort.
+
+So a false entry costs, at worst, one wasted failover attempt; it cannot hijack
+a working client. Stronger admission (proof-of-work on bridge identities,
+gossiped reputation, trusted-root attestation) is a deferred hardening, not
+something the directory provides today.
+
 ### TURN is part of the deal
 
 About a third of peers sit behind NAT that blocks direct WebRTC. For them the
