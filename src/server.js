@@ -54,6 +54,19 @@ import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 // package.json was already a version ahead).
 const VERSION   = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const PORT      = Number.parseInt(process.env.PORT ?? '8080', 10);
+// Bind address. Default 0.0.0.0 keeps the container/Docker path working (Caddy
+// reaches the bridge over the compose network). Behind nginx on the SAME host
+// (the systemd path), set HOST=127.0.0.1 so the raw bridge port is NOT
+// world-reachable — all traffic must arrive through nginx (TLS, logging,
+// X-Forwarded-For, rate limits). See G-7 in the security punch list.
+const HOST      = process.env.HOST ?? '0.0.0.0';
+// Operator token gating the FULL /healthz body and the /diag endpoint (G-8).
+// Unauthenticated callers get a minimal /healthz (status + version only) and no
+// /diag at all, so the public surface doesn't hand out topology, the
+// `uplink.connected` seed tell, per-connection IPs, or node ids. Set it in the
+// bridge env and pass `X-Healthz-Token: <value>` for the full readout. If unset,
+// the full body/diag are simply unavailable (closed by default).
+const HEALTHZ_TOKEN = process.env.HEALTHZ_TOKEN ?? null;
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
 // Version gate.  Browsers running an older peer can't be trusted to
@@ -153,23 +166,32 @@ const startTs   = Date.now();
 // peer using the scheme from draft-uberti-rtcweb-turn-rest, which is
 // what coturn's `use-auth-secret` mode validates against:
 //
-//   username   = "<expiry-unix-seconds>:<peerId>"
+//   username   = "<expiry-unix-seconds>:<ephemeral-random-token>"
 //   credential = base64( HMAC-SHA1( secret, username ) )
 //
-// The secret is shared with coturn out-of-band (both read it from the
-// same value — coturn from its conf file, the bridge from this env
-// var).  Peers never see the secret; they get a derived credential
-// that expires in TURN_TTL_SECONDS.  This is what keeps the bridge
-// from baking long-term credentials into peer source.
+// The username's second field is an EPHEMERAL per-session random token,
+// NOT the peer's node id (G-5). coturn's use-auth-secret mode only parses
+// the expiry prefix and validates the HMAC over the whole string — the
+// suffix is opaque to it — so a random token works identically while
+// denying a TURN operator (which may be a separate party from the
+// signaling bridge) a stable per-peer handle to correlate relay sessions
+// across time. The secret is shared with coturn out-of-band (both read it
+// from the same value — coturn from its conf file, the bridge from this
+// env var). Peers never see the secret; they get a derived credential
+// that expires in TURN_TTL_SECONDS.
 const TURN_AUTH_SECRET = process.env.TURN_AUTH_SECRET ?? null;
 const TURN_TTL_SECONDS = 60 * 60 * 2;   // 2h — longer than any realistic session
 const TURN_URLS        = (process.env.TURN_URLS ?? 'turn:turn.axona.net:3478,turns:turn.axona.net:5349')
   .split(',').map(s => s.trim()).filter(Boolean);
 
-function makeTurnCredential(peerId) {
+function makeTurnCredential(_peerId) {
   if (!TURN_AUTH_SECRET) return null;
   const expiry   = Math.floor(Date.now() / 1000) + TURN_TTL_SECONDS;
-  const username = `${expiry}:${peerId}`;
+  // Ephemeral per-session token, not the peer's node id (G-5): no stable
+  // handle for a TURN operator to correlate sessions by. coturn validates
+  // the HMAC over the whole username regardless of the suffix.
+  const token    = crypto.randomBytes(9).toString('base64url');
+  const username = `${expiry}:${token}`;
   const credential = crypto
     .createHmac('sha1', TURN_AUTH_SECRET)
     .update(username)
@@ -360,35 +382,44 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.url === '/healthz') {
-    // Count admitted vs pending so operators can see how many
-    // connections passed the version gate.
-    let admittedCount = 0, pendingCount = 0;
-    for (const c of connections.values()) {
-      if (c.admitted) admittedCount++; else pendingCount++;
+    // G-8: minimal by default; full topology only with the operator token.
+    const authed = HEALTHZ_TOKEN && req.headers['x-healthz-token'] === HEALTHZ_TOKEN;
+    let body;
+    if (!authed) {
+      // Unauthenticated liveness only — enough for clients/monitors to read the
+      // deployed version, nothing that fingerprints topology or names the seed.
+      body = JSON.stringify({ status: 'ok', version: VERSION, kernelVersion: KERNEL_VERSION });
+    } else {
+      // Count admitted vs pending so operators can see how many
+      // connections passed the version gate.
+      let admittedCount = 0, pendingCount = 0;
+      for (const c of connections.values()) {
+        if (c.admitted) admittedCount++; else pendingCount++;
+      }
+      body = JSON.stringify({
+        status:         'ok',
+        connections:    connections.size,
+        admitted:       admittedCount,
+        pending:        pendingCount,
+        minPeerVersion:    MIN_PEER_VERSION,
+        minKernelVersion:  MIN_KERNEL_VERSION,
+        minPeerAppVersion: MIN_PEER_APP_VERSION,
+        uptimeS:        Math.floor((Date.now() - startTs) / 1000),
+        version:        VERSION,
+        kernelVersion:  KERNEL_VERSION,
+        axona: {
+          nodeId:         idToHex(bridgeNode.nodeId),
+          region:         bridgeNode.identity.region.label,
+          synaptomeSize:  bridgeNode.getSynaptome().length,
+        },
+        directory: {
+          enabled: directory.enabled,
+          url:     directory.url,
+          known:   bridgeBook ? bridgeBook.count : 0,
+        },
+        uplink: bridgeNode.uplinkStatus(),
+      });
     }
-    const body = JSON.stringify({
-      status:         'ok',
-      connections:    connections.size,
-      admitted:       admittedCount,
-      pending:        pendingCount,
-      minPeerVersion:    MIN_PEER_VERSION,
-      minKernelVersion:  MIN_KERNEL_VERSION,
-      minPeerAppVersion: MIN_PEER_APP_VERSION,
-      uptimeS:        Math.floor((Date.now() - startTs) / 1000),
-      version:        VERSION,
-      kernelVersion:  KERNEL_VERSION,
-      axona: {
-        nodeId:         idToHex(bridgeNode.nodeId),
-        region:         bridgeNode.identity.region.label,
-        synaptomeSize:  bridgeNode.getSynaptome().length,
-      },
-      directory: {
-        enabled: directory.enabled,
-        url:     directory.url,
-        known:   bridgeBook ? bridgeBook.count : 0,
-      },
-      uplink: bridgeNode.uplinkStatus(),
-    });
     res.writeHead(200, {
       'Content-Type':   'application/json',
       'Content-Length': Buffer.byteLength(body),
@@ -406,6 +437,14 @@ const httpServer = http.createServer((req, res) => {
   //     (if NOT, the bridge's pubsub fan-out skips them — root cause)
   //   - how long since we heard from them
   if (req.url === '/diag') {
+    // G-8: /diag exposes per-connection IPs, node ids, and UAs — operator-only.
+    // Closed by default (404, so the endpoint isn't even advertised) unless the
+    // operator token is set and presented.
+    if (!HEALTHZ_TOKEN || req.headers['x-healthz-token'] !== HEALTHZ_TOKEN) {
+      res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
+      res.end('{"error":"not found"}');
+      return;
+    }
     const synaptome    = bridgeNode.getSynaptome();
     const synaptomeIds = new Set(synaptome.map(s => s.peerId));   // BigInts
     const now = Date.now();
@@ -813,8 +852,9 @@ function sweepIdleConnections() {
 const idleSweepTimer = setInterval(sweepIdleConnections, IDLE_CHECK_INTERVAL_MS);
 
 // ── Boot ─────────────────────────────────────────────────────────────
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, HOST, () => {
   log('listen', {
+    host:                  HOST,
     port:                  PORT,
     logLevel:              LOG_LEVEL,
     version:               VERSION,

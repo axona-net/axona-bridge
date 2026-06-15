@@ -110,18 +110,35 @@ its TURN endpoint in the directory; credentials are never published.
 
 ## Path A — one-command installer
 
-On a fresh Ubuntu/Debian host, as root:
+> [!IMPORTANT]
+> **Review before you run, and pin a release.** The installer runs as root.
+> Piping a script straight from `main` into `sudo bash` executes whatever is at
+> HEAD on every run — a real supply-chain surface. For production, **clone, check
+> out a release tag, read the script, then run it locally** (below). The
+> `curl | bash` one-liner is fine for a quick throwaway, not for a bridge you
+> intend to keep.
+
+**Recommended (clone, pin, review, run):**
+
+```bash
+git clone https://github.com/axona-net/axona-bridge.git
+cd axona-bridge
+git checkout v2.26.0          # pin a release tag, not main (see `git tag` for the list)
+less deploy/install.sh        # read what you're about to run as root
+sudo BRIDGE_DOMAIN=bridge.example.org LETSENCRYPT_EMAIL=you@example.org \
+  bash deploy/install.sh
+```
+
+Pinning a tag means every update is a conscious, reviewed `git checkout` — not a
+silent pull of whatever landed on `main`. `npm ci` then installs the exact
+dependency tree recorded in the committed `package-lock.json` (which pins the
+`@axona/protocol` kernel to a specific commit), so the build is reproducible.
+
+**Quick / throwaway (remote bootstrap from `main` — convenient, less safe):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/axona-net/axona-bridge/main/deploy/install.sh \
   | sudo BRIDGE_DOMAIN=bridge.example.org LETSENCRYPT_EMAIL=you@example.org bash
-```
-
-…or clone first and run it (same thing, lets you read it first):
-
-```bash
-git clone https://github.com/axona-net/axona-bridge.git
-sudo bash axona-bridge/deploy/install.sh        # prompts for domain + email
 ```
 
 It installs Node + nginx + certbot + coturn, creates the service user, fetches
@@ -259,9 +276,17 @@ docker compose logs -f bridge          # Path B
   --build`. The protocol gates on version, so keep reasonably current — a bridge
   too far behind the network's kernel floor is refused.
 - **Identity is precious-ish** — the keypair at `BRIDGE_IDENTITY_PATH` (or the
-  `bridge-data` volume) is your bridge's stable directory identity and the key
-  clients build reputation on. Back it up; if you lose it the bridge simply
-  reappears as a new, fresh entry.
+  `bridge-data` volume) is your bridge's stable directory identity. Back it up to
+  encrypted offline storage; restrict it to the service user. If it leaks, an
+  attacker can run a bridge that *publishes under your directory entry* — note
+  that reputation is **first-party** (each client trusts only what it has
+  personally observed), so a thief inherits your entry, not other clients' trust;
+  still, rotate (regenerate) the identity if you suspect exposure.
+- **Don't expose the raw port or the full healthz** — the installer sets
+  `HOST=127.0.0.1` (the bridge listens on loopback; only nginx reaches it) and a
+  `HEALTHZ_TOKEN` (unauthenticated `/healthz` returns liveness + version only;
+  full topology and `/diag` require the `X-Healthz-Token` header). Keep both. If
+  you deploy by hand, set them yourself.
 - **Stay a good citizen** — run TURN, keep TLS valid (certbot auto-renews;
   `certbot renew --dry-run` to check), and set an honest `BRIDGE_REGION_LABEL` /
   lat-lng (clients rank by proximity — a wrong location just gets you ranked
@@ -270,7 +295,39 @@ docker compose logs -f bridge          # Path B
   neither advertises itself nor federates (e.g. a private deployment or a
   testnet). It still works as a rendezvous for clients you point at it directly.
 - **Never share secrets across bridges** — each bridge gets its own
-  `TURN_AUTH_SECRET` and its own identity.
+  `TURN_AUTH_SECRET`, its own `HEALTHZ_TOKEN`, and its own identity.
+
+## Operator security & legal
+
+Running a bridge is operating public communication infrastructure. A few things
+worth deciding *before* you go live — none of them are the project telling you
+what to do, just the considerations the deployment model implies.
+
+- **Your bridge is publicly identifiable.** Its `wss://` endpoint, region, and
+  coarse coordinates are advertised in the directory, and its IP/domain are
+  recorded by every client that ever bootstraps through it. Assume it is
+  discoverable by anyone — including by internet-wide scanning, regardless of the
+  directory.
+- **Coordinates: coarse, not precise.** Advertise region-level
+  `BRIDGE_LAT`/`BRIDGE_LNG`, not your exact location. The proximity-ranking
+  penalty for imprecision is small; the jurisdictional information precise
+  coordinates disclose is not.
+- **Jurisdiction & hosting.** Understand your host jurisdiction's rules on
+  communication infrastructure, data retention, and intermediary liability before
+  going live. Consider a registrar/DNS provider and a hosting provider that suit
+  the users you intend to serve, and consider operating under a legal entity
+  rather than personally.
+- **Know what you do and don't log.** The bridge sees connection metadata
+  (IP ↔ node-id ↔ pairing events) and, for TURN-relayed sessions, traffic
+  timing/volume — content is end-to-end encrypted and not visible. Decide your
+  retention posture deliberately and have a documented plan for how you'd respond
+  to a legal demand: what you keep, for how long, and what you would say.
+- **Threat-model your users.** If you run a bridge specifically to support
+  circumvention in an adversarial jurisdiction, understand the risk to yourself
+  and your provider if either has a nexus there.
+
+These are operator choices, not protocol requirements — but the documentation
+would be dishonest not to name them.
 
 ## Troubleshooting
 
