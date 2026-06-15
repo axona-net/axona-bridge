@@ -16,6 +16,12 @@ sudo apt -y install nodejs
 # nginx + certbot
 sudo apt -y install nginx certbot python3-certbot-nginx
 
+# TURN — ALWAYS deploy a TURN server with a bridge (not optional): a STUN-only
+# bridge can't relay for peers behind symmetric NAT. Stand up coturn on this
+# droplet (shared static-auth-secret), set TURN_AUTH_SECRET (== coturn's) +
+# TURN_URLS in the env; the bridge then mints creds in its welcome AND advertises
+# the TURN endpoint in its directory entry. Full coturn config: deploy/testnet-setup.md §4b.
+
 # Service user + workdir
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin axona
 sudo mkdir -p /opt/axona-bridge
