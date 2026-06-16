@@ -1,22 +1,34 @@
 # axona-bridge — San Francisco testnet droplet
 
-A second Digital Ocean droplet that runs the **2.28.0 release build** (kernel
-`v2.28.0`, bridge `2.13.0`) as an isolated testnet, hosted in San Francisco.
-Identical in setup to the production droplet (`bridge.axona.net`, NYC) except:
+A second Digital Ocean droplet hosted in San Francisco, identical in setup to
+the production droplet (`bridge.axona.net`, NYC) except as noted below. It's a
+staging endpoint for exercising a build before the prod wave.
+
+> **Status (2026-06-16).** The droplet tracks the **`testnet` branch** and
+> mirrors the current kernel line — it is **NOT** frozen at the historical
+> `release/2.28.0` partition build. As of this date it serves **bridge 2.28.0 /
+> kernel v2.48.0** (deploy: kernel-2.48.0 testnet wave). Earlier revisions of
+> this doc described an isolated `release/2.28.0` flag-day fixture; that framing
+> is obsolete (see the isolation note below).
 
 | | production | SF testnet |
 |---|---|---|
 | region | NYC | **SFO3** |
-| hostname | `bridge.axona.net` | **`testnet.axona.net`** (pick your own) |
-| build | `main` (kernel 2.16.0) | **`release/2.28.0`** (kernel 2.28.0) |
+| IPv4 | `64.227.2.28` | **`161.35.234.165`** |
+| hostname | `bridge.axona.net` | **`testnet.axona.net`** |
+| branch | `main` | **`testnet`** |
 | node geo | 38.00, −77.00 (us-east) | **37.77, −122.42 (us-west)** |
 | TURN secret / identity | production's | **its own** (never reuse prod's) |
 
-Because the 2.28.0 build carries the network partition (AUTH_PROTO `axona/5`,
-WIRE_VERSION `2.0`), this testnet is **cryptographically isolated** from the
-live 2.16.0 network by construction — a production node can't authenticate into
-it and vice-versa, even though it's a separate endpoint. That's the point: it
-lets you exercise the full flag-day build end-to-end before touching prod.
+**Isolation model (current).** The testnet shares the prod wire/auth version, so
+it is *not* cryptographically partitioned from prod the way the old
+`release/2.28.0` fixture was — a current node could in principle authenticate
+into either. Separation today is **operational, not cryptographic**: a distinct
+hostname/endpoint, its own TURN secret, and `BRIDGE_DIRECTORY=off` so the testnet
+bridge never advertises itself into the public directory prod apps read. Clients
+reach it only by being pointed at `wss://testnet.axona.net` explicitly. If you
+need a hard cryptographic partition again (e.g. to rehearse a flag-day), bump
+AUTH_PROTO / WIRE_VERSION on a dedicated branch and deploy that here instead.
 
 ---
 
@@ -66,7 +78,7 @@ sudo mkdir -p /opt/axona-bridge && sudo chown -R axona:axona /opt/axona-bridge
 
 ```bash
 cd /opt/axona-bridge
-sudo -u axona git clone -b release/2.28.0 https://github.com/axona-net/axona-bridge.git .
+sudo -u axona git clone -b testnet https://github.com/axona-net/axona-bridge.git .
 sudo -u axona npm ci --omit=dev      # vendors @axona/protocol#v2.28.0
 ```
 
@@ -217,7 +229,7 @@ at the gate** (`4426`), proving the partition.
 
 ```bash
 cd /opt/axona-bridge
-sudo -u axona git pull            # stays on release/2.28.0
+sudo -u axona git pull            # stays on the testnet branch
 sudo -u axona npm ci --omit=dev
 sudo systemctl restart axona-bridge
 ```
