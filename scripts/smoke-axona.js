@@ -12,10 +12,14 @@
 
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { deriveIdentity, buildAuthHello, cbvFromNonces } from '@axona/protocol';
+import { createNodeIdentity, buildAuthHello, cbvFromNonces, WIRE_VERSION, AUTH_PROTO } from '@axona/protocol';
 
 const BRIDGE_PORT = 19082;
 const BRIDGE_URL  = `ws://localhost:${BRIDGE_PORT}`;
+// G-8 hardening: /healthz only exposes the `axona` topology section to an
+// operator presenting HEALTHZ_TOKEN; unauthenticated callers get liveness
+// only. The smoke sets a token on the bridge and presents it to read .axona.
+const HEALTHZ_TOKEN = 'smoke-healthz-token';
 
 let passed = 0, failed = 0;
 function check(label, condition) {
@@ -41,6 +45,8 @@ function startBridge() {
       LOG_LEVEL: 'info',
       // Pin the gate to the version the smoke client sends.
       MIN_PEER_VERSION: PEER_VERSION_FOR_SMOKE,
+      // Open the full /healthz topology readout to this run (G-8).
+      HEALTHZ_TOKEN,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -66,8 +72,14 @@ async function waitForReady(check, timeoutMs = 3000) {
 }
 
 // Smoke clients impersonate a compliant peer at PEER_VERSION_FOR_SMOKE.
-// Bump this if the bridge raises MIN_PEER_VERSION beyond it.
-const PEER_VERSION_FOR_SMOKE = '0.12.0';
+// Bump this if the bridge raises MIN_PEER_VERSION beyond it. The bridge's
+// client-hello gate has two checks: (1) wire major must equal the network's
+// (kernel WIRE_VERSION major, '3' as of the v0.3 flag-day — the hermetic
+// partition axis), and (2) the reported version must clear its namespace floor
+// (MIN_KERNEL_VERSION / MIN_PEER_APP_VERSION, both 3.0.0). We pose as a current
+// v3.0.0 kernel peer.
+const PEER_VERSION_FOR_SMOKE = '3.0.0';
+const PEER_WIRE_FOR_SMOKE    = WIRE_VERSION;   // '3.0'
 
 function openClient() {
   return new Promise((resolve, reject) => {
@@ -94,7 +106,9 @@ function openClient() {
       // a compliant peer.
       try {
         ws.send(JSON.stringify({
-          type: 'client-hello', version: PEER_VERSION_FOR_SMOKE,
+          type: 'client-hello',
+          version: PEER_VERSION_FOR_SMOKE,
+          wireVersion: PEER_WIRE_FOR_SMOKE,
         }));
       } catch (err) { reject(err); return; }
       resolve(ws);
@@ -147,13 +161,14 @@ async function main() {
   check('peer-list arrived (empty)',
     peerList.peers && Array.isArray(peerList.peers) && peerList.peers.length === 0);
 
-  // The bridge's embedded peer sends an AUTHENTICATED hello (axona/4):
-  // proto + nodeId + pubkey + Ed25519 sig over the per-connection CBV.
+  // The bridge's embedded peer sends an AUTHENTICATED hello (AUTH_PROTO,
+  // 'axona/5' as of kernel 3.0.0): proto + nodeId + pubkey + Ed25519 sig
+  // over the per-connection CBV.
   const hello = await nextMessage(ws, m =>
     m.type === 'axona' && m.payload?.type === 'hello'
   );
-  check('axona/4 authenticated hello frame arrived',
-    hello.payload.body?.proto === 'axona/4' &&
+  check(`${AUTH_PROTO} authenticated hello frame arrived`,
+    hello.payload.body?.proto === AUTH_PROTO &&
     typeof hello.payload.body?.nodeId === 'string' &&
     hello.payload.body.nodeId.length === 66 &&
     typeof hello.payload.body?.pubkey === 'string' &&
@@ -164,7 +179,7 @@ async function main() {
   // ── Reply with an AUTHENTICATED hello-ack ────────────────────────
   // Pose as a real browser peer: a genuine Ed25519 identity, signing
   // over the same channel-binding value (welcome.serverNonce + connId).
-  const browser  = await deriveIdentity({ lat: 38.0, lng: -77.0 });
+  const browser  = await createNodeIdentity({ lat: 38.0, lng: -77.0 });
   const myNodeId = BigInt('0x' + browser.id);
   const cbv      = cbvFromNonces(welcome.serverNonce, welcome.connId, 'bridge');
   const ack      = await buildAuthHello({ identity: browser, cbv });
@@ -178,7 +193,8 @@ async function main() {
   await new Promise(r => setTimeout(r, 80));
 
   // ── Verify via /healthz that the bridge's synaptome grew ─────────
-  const healthz = await fetch(`http://localhost:${BRIDGE_PORT}/healthz`).then(r => r.json());
+  const healthz = await fetch(`http://localhost:${BRIDGE_PORT}/healthz`,
+    { headers: { 'x-healthz-token': HEALTHZ_TOKEN } }).then(r => r.json());
   check('healthz reports an axona section',           healthz.axona != null);
   check('healthz nodeId matches the hello frame',     healthz.axona.nodeId === hello.payload.body.nodeId);
   check('healthz synaptome contains the new peer',    healthz.axona.synaptomeSize >= 1);
@@ -224,11 +240,14 @@ async function main() {
   // ── Close + verify bridge cleans up ──────────────────────────────
   ws.close();
   await new Promise(r => setTimeout(r, 100));
-  const healthzAfter = await fetch(`http://localhost:${BRIDGE_PORT}/healthz`).then(r => r.json());
-  check('synaptome retained the dead peer (NH-1 behavior)',
-    // NH-1 keeps the synapse but adds to _deadPeers.  The synaptome
-    // size remains the same; the peer is filtered at routing time.
-    healthzAfter.axona.synaptomeSize >= 1);
+  const healthzAfter = await fetch(`http://localhost:${BRIDGE_PORT}/healthz`,
+    { headers: { 'x-healthz-token': HEALTHZ_TOKEN } }).then(r => r.json());
+  check('synaptome cleaned up after the only peer disconnected',
+    // On the peer's WS close the bridge tears the synapse down (the
+    // connId↔nodeId binding goes away with the transport), so with the
+    // sole peer gone the synaptome returns to empty.
+    typeof healthzAfter.axona?.synaptomeSize === 'number' &&
+    healthzAfter.axona.synaptomeSize === 0);
 
   // ── Tear down ────────────────────────────────────────────────────
   child.kill('SIGTERM');

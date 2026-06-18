@@ -1,6 +1,6 @@
 {
   "name": "axona-bridge",
-  "version": "2.28.3",
+  "version": "2.29.0",
   "private": true,
   "description": "Axona Phase 3 — WebSocket bridge: signaling relay + embedded highway peer (Axona DHT participant)",
   "type": "module",
@@ -17,7 +17,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@axona/protocol": "github:axona-net/axona-protocol#v2.51.0",
+    "@axona/protocol": "github:axona-net/axona-protocol#v3.0.0",
     "node-datachannel": "^0.32.3",
     "ws": "^8.18.0"
   },

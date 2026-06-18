@@ -13,9 +13,19 @@
 // advertise itself into the public directory the production apps consume.
 // =====================================================================
 
-import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry } from '@axona/protocol';
+import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry, createAuthorIdentity } from '@axona/protocol';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// v0.3: the directory is a well-known OPEN topic. The pre-v0.3 scheme was a
+// public (publisher: null → 0x00 global) topic keyed solely on the topic NAME
+// 'axona:bridge-directory'. v0.3 removes the global region: an open topic must
+// name a real, populated region, and every bridge + client must derive the SAME
+// (region, name) so they meet on one topic id. We pin the directory to the
+// 'useast' region (the design doc's "deliberate, app-visible hot spot" pattern
+// for a topic the whole network must share) and reuse the kernel's topic-name
+// constant verbatim, so the directory keeps a single canonical placement.
+const DIRECTORY_TOPIC = { region: 'useast', name: BRIDGE_DIRECTORY_TOPIC };
 
 /**
  * Start publishing this bridge to the directory.
@@ -53,11 +63,20 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     turn:  env.TURN_URLS,          // advertise this bridge's TURN endpoint(s), if any
   });
 
+  // v0.3 separates the node/connection key from the AUTHORSHIP key: a publish
+  // must be signed with an Author identity (peer.pub({signWith})). The directory
+  // dedups + ranks on the entry URL, not the signer (the bridge transport id is
+  // ephemeral and the signer rotates every restart), so an ephemeral author is
+  // fine here — it proves the entry wasn't tampered in transit, nothing more.
+  // Minted lazily so a disabled/misconfigured bridge does no keygen.
+  let author = null;
+
   async function publish(reason) {
     try {
-      // Public topic (publisher: null) → globally discoverable; the
-      // bridge signs it, so its signerPubkey is its stable directory id.
-      await peer.pub(BRIDGE_DIRECTORY_TOPIC, makeEntry(), { publisher: null });
+      if (!author) author = await createAuthorIdentity();
+      // Open topic (write:'open') in a fixed region → globally discoverable; the
+      // bridge signs it, so its signerPubkey is its (rotating) directory id.
+      await peer.pub(DIRECTORY_TOPIC, makeEntry(), { signWith: author });
       log('published', { url, reason });
     } catch (err) {
       log('publish-failed', { reason, err: err?.message });
@@ -69,23 +88,23 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
   // before peers reconnect) is then retrievable by any later subscriber that
   // routes to the bridge (it's in every peer's synaptome). Without this the
   // launch publish would route into an empty mesh and be lost as the real
-  // 0x00-closest roots fill in. Best-effort.
+  // region-closest roots fill in. Best-effort.
   let sub = null;
   (async () => {
-    try { await peer.host(BRIDGE_DIRECTORY_TOPIC, { publisher: null }); log('hosting', {}); }
+    try { await peer.host(DIRECTORY_TOPIC); log('hosting', {}); }
     catch (err) { log('host-failed', { err: err?.message }); }
     await publish('launch');
     // Subscribe to the directory and persist what we learn — a bridge keeps the
     // list like any node, so it can bootstrap from saved bridges next launch.
     if (book) {
       try {
-        sub = await peer.sub(BRIDGE_DIRECTORY_TOPIC, (envp) => {
+        sub = await peer.sub(DIRECTORY_TOPIC, (envp) => {
           if (!envp || envp.deleted || !envp.signerPubkey) return;
           if (envp.message?.url === url) return;          // skip our own entry
           if (book.merge(envp.message, envp.signerPubkey)) {
             log('learned', { url: envp.message?.url, known: book.count });
           }
-        }, { publisher: null, since: 'all' });
+        }, { since: 'all' });
       } catch (err) { log('subscribe-failed', { err: err?.message }); }
     }
   })();

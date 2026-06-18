@@ -127,15 +127,29 @@ const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 // and peer app 3.25.0 (the post-partition release — one bump above the deployed
 // 3.24.0, so every pre-partition app is below the floor). Both env-overridable
 // for staged rollout / rollback.
-const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '2.28.0';
-const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.25.0';
+// 2026-06 v0.3 IDENTITY/AUTHORSHIP flag-day. The kernel moved to the 3.x line
+// (KERNEL_VERSION 3.0.0) and WIRE_VERSION 2.0 → 3.0 (the signed envelope now
+// carries a topic DESCRIPTOR object, wire-incompatible with 2.x). The hermetic
+// partition gate is now REQUIRED_WIRE_MAJOR = 3 below — every old-network peer
+// (wire major 2) is rejected there regardless of its reported version. These
+// version floors are therefore no longer load-bearing for the partition; they
+// are kept only so the reported semver still surfaces cleanly. The old
+// major-version *namespace* heuristic in flagDayFloor is now degenerate (kernel
+// 3.0.0 and peer-app 3.x both land in the "peer-app" bucket), so MIN_PEER_APP
+// is relaxed to 3.0.0 to admit BOTH the demo (reports kernel 3.0.0) and the
+// peer app (reports its app 3.x) — the wire-major gate blocks any stale 3.x
+// peer that still vendors a 2.x kernel. Both env-overridable for rollback.
+const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '3.0.0';
+const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.0.0';
 
-// Wire-format major the new network speaks (kernel WIRE_VERSION '2.0'). The
-// client-hello now carries `wireVersion`; the gate rejects any peer whose major
-// differs — OR (pre-flag-day peers) that omits it entirely — so only new-network
-// peers are admitted. Bridge-local (NOT the vendored kernel's WIRE_VERSION) so
-// it stays correct even before the bridge re-vendors. Env-overridable.
-const REQUIRED_WIRE_MAJOR  = process.env.REQUIRED_WIRE_MAJOR  ?? '2';
+// Wire-format major the new network speaks (kernel WIRE_VERSION '3.0' as of the
+// v0.3 flag-day). The client-hello carries `wireVersion`; the gate rejects any
+// peer whose major differs — OR (pre-flag-day peers) that omits it entirely — so
+// only new-network (v0.3, wire major 3) peers are admitted. This is the
+// load-bearing, hermetic partition gate. Bridge-local (NOT the vendored kernel's
+// WIRE_VERSION) so it stays correct even before the bridge re-vendors.
+// Env-overridable for staged rollout / rollback.
+const REQUIRED_WIRE_MAJOR  = process.env.REQUIRED_WIRE_MAJOR  ?? '3';
 
 /** Three-component numeric semver compare; returns true iff a >= b. */
 function gteVersion(a, b) {

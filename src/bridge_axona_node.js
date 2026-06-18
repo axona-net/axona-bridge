@@ -155,12 +155,13 @@ export class BridgeAxonaNode {
 
     this._registerNH1Handlers();
 
-    // I4: pass identity to AxonaPeer so the kernel's unified pub/sub
-    // path (peer.pub) can build signed envelopes.
+    // v0.3: AxonaPeer takes the NODE/connection identity as `nodeIdentity`
+    // (was `identity`); the publish key is no longer a peer-level field —
+    // authorship is supplied per-publish via { signWith } (see bridge_directory).
     this._peer = new AxonaPeer({
-      engine:   this._engine,
-      node:     this._node,
-      identity: this._identity,
+      engine:       this._engine,
+      node:         this._node,
+      nodeIdentity: this._identity,
     });
     await this._peer.start();
 

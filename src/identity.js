@@ -1,10 +1,11 @@
 // =====================================================================
 // identity.js — bridge's hybrid (legacy 64-bit + kernel 264-bit) identity.
 //
-// I4: migrated to the kernel's deriveIdentity / dumpIdentity /
-// loadIdentity so the bridge is a kernel-conformant peer in the
-// v1.0 wire protocol — signed envelopes work, peer.pub topics
-// derive correctly under both publisher-keyed and public modes.
+// v0.3 (kernel 3.0.0): migrated to the kernel's createNodeIdentity (the
+// connection/node identity factory; deriveIdentity was renamed) so the
+// bridge is a kernel-conformant peer in the v1.0 wire protocol — signed
+// envelopes work, peer topics derive correctly under the structured
+// { region, name } addressing model.
 //
 // Returned shape (matches axona-peer/src/identity.js after #46):
 //
@@ -33,7 +34,7 @@
 // no BRIDGE_IDENTITY_PATH.
 // =====================================================================
 
-import { deriveIdentity as kernelDeriveIdentity } from '@axona/protocol';
+import { createNodeIdentity as kernelCreateNodeIdentity } from '@axona/protocol';
 
 const GEO_BITS = 8;
 
@@ -61,20 +62,19 @@ function regionFromEnv() {
  */
 
 /**
- * Load the persisted identity from disk, or derive a fresh one and
- * persist it.  ASYNC now — kernel deriveIdentity uses Web Crypto
- * Ed25519 keygen (async).
+ * Derive a fresh node/connection identity.  ASYNC — kernel
+ * createNodeIdentity uses Web Crypto Ed25519 keygen (async).
  *
  * @returns {Promise<BridgeIdentity>}
  */
 export async function loadOrDeriveIdentity() {
   // Phase 2: the bridge transport id is EPHEMERAL — never persisted. The bridge
-  // mints a fresh kernel identity on every start (no bridge-identity.json). The
-  // bridge directory + first-party reputation are keyed on the bridge URL, not
-  // on the (now-rotating) signer, so clients still find + rank it across
+  // mints a fresh kernel node identity on every start (no bridge-identity.json).
+  // The bridge directory + first-party reputation are keyed on the bridge URL,
+  // not on the (now-rotating) signer, so clients still find + rank it across
   // restarts; a fresh signer simply re-publishes the same-URL directory entry.
   const labels = regionFromEnv();
-  const kernel = await kernelDeriveIdentity({ lat: labels.lat, lng: labels.lng });
+  const kernel = await kernelCreateNodeIdentity({ lat: labels.lat, lng: labels.lng });
   return buildHybrid(kernel, labels);
 }
 
