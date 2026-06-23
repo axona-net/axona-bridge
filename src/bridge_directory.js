@@ -94,6 +94,16 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     try { await peer.host(DIRECTORY_TOPIC); log('hosting', {}); }
     catch (err) { log('host-failed', { err: err?.message }); }
     await publish('launch');
+    // Self-identify: declare this signer's author-class as 'bridge' (kernel
+    // attestation on the signer's own owner-only profile topic). A client that
+    // resolves the directory entry's signerPubkey via getAuthorClass then sees
+    // it's a bridge, not a person/agent. The signer is ephemeral (rotates per
+    // restart), so we re-declare each launch. Best-effort + tolerant of an
+    // older kernel that doesn't know the 'bridge' class (→ caught here).
+    if (author) {
+      try { await peer.setAuthorClass('bridge', { signWith: author, label: url }); log('class-declared', { class: 'bridge' }); }
+      catch (err) { log('class-failed', { err: err?.message }); }
+    }
     // Subscribe to the directory and persist what we learn — a bridge keeps the
     // list like any node, so it can bootstrap from saved bridges next launch.
     if (book) {
