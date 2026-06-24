@@ -149,7 +149,7 @@ const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.15.0';
 // load-bearing, hermetic partition gate. Bridge-local (NOT the vendored kernel's
 // WIRE_VERSION) so it stays correct even before the bridge re-vendors.
 // Env-overridable for staged rollout / rollback.
-const REQUIRED_WIRE_MAJOR  = process.env.REQUIRED_WIRE_MAJOR  ?? '3';
+const REQUIRED_WIRE_MAJOR  = process.env.REQUIRED_WIRE_MAJOR  ?? '4';
 
 /** Three-component numeric semver compare; returns true iff a >= b. */
 function gteVersion(a, b) {
