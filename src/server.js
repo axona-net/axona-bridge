@@ -139,8 +139,8 @@ const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 // is relaxed to 3.0.0 to admit BOTH the demo (reports kernel 3.0.0) and the
 // peer app (reports its app 3.x) — the wire-major gate blocks any stale 3.x
 // peer that still vendors a 2.x kernel. Both env-overridable for rollback.
-const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '3.0.0';
-const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.0.0';
+const MIN_KERNEL_VERSION   = process.env.MIN_KERNEL_VERSION   ?? '3.15.0';
+const MIN_PEER_APP_VERSION = process.env.MIN_PEER_APP_VERSION ?? '3.15.0';
 
 // Wire-format major the new network speaks (kernel WIRE_VERSION '3.0' as of the
 // v0.3 flag-day). The client-hello carries `wireVersion`; the gate rejects any
