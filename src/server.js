@@ -102,11 +102,12 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.1.0';
 // STRICT_VERSION island: when set, reject any client whose client-hello
 // `kernelVersion` is missing or below this floor (close 4426). Unlike
-// MIN_PEER_VERSION (which gates the app's own `version`, inconsistent across
-// apps) this gates the exact kernel build, so an operator can isolate a
-// single-kernel island (e.g. 4.8.1+) from older nodes that can't serve as
-// pub/sub roots. Unset (default) = no kernel-version gate.
-const MIN_KERNEL_VERSION = process.env.MIN_KERNEL_VERSION ?? null;
+// MIN_PEER_VERSION (gates the app's own `version`, inconsistent across apps) and
+// the legacy MIN_KERNEL_VERSION flag-day floor below (only applies to major<3
+// nodes), this gates the EXACT kernel build reported in the hello, so an operator
+// can isolate a single-kernel island (e.g. 4.8.1+) from older 4.x nodes that
+// can't serve as pub/sub roots. Unset (default) = no gate.
+const STRICT_MIN_KERNEL = process.env.STRICT_MIN_KERNEL ?? null;
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
@@ -718,19 +719,18 @@ wss.on('connection', (ws, req) => {
         return;
       }
       // Kernel-version floor (STRICT_VERSION island): isolate older kernels
-      // that can't serve as pub/sub roots. Gated on the optional
-      // MIN_KERNEL_VERSION env; the client-hello carries `kernelVersion` (kernel
-      // ≥ 4.8.1). A missing field means a pre-4.8.1 build → rejected when the
-      // floor is set.
-      if (MIN_KERNEL_VERSION) {
+      // that can't serve as pub/sub roots. Gated on the optional STRICT_MIN_KERNEL
+      // env; the client-hello carries `kernelVersion` (kernel ≥ 4.8.1). A missing
+      // field means a pre-4.8.1 build → rejected when the floor is set.
+      if (STRICT_MIN_KERNEL) {
         const peerKernel = typeof msg.kernelVersion === 'string' ? msg.kernelVersion : null;
-        if (!peerKernel || !gteVersion(peerKernel, MIN_KERNEL_VERSION)) {
+        if (!peerKernel || !gteVersion(peerKernel, STRICT_MIN_KERNEL)) {
           logErr('client-hello-kernel-too-old', {
-            connId: id, peerVersion, peerKernel, minKernel: MIN_KERNEL_VERSION,
+            connId: id, peerVersion, peerKernel, minKernel: STRICT_MIN_KERNEL,
           });
           try {
             ws.close(CLOSE_UPGRADE_REQUIRED,
-              `kernel v${peerKernel ?? 'legacy'} below minimum v${MIN_KERNEL_VERSION}; reload to upgrade`);
+              `kernel v${peerKernel ?? 'legacy'} below minimum v${STRICT_MIN_KERNEL}; reload to upgrade`);
           } catch {}
           return;
         }
