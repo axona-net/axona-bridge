@@ -100,6 +100,13 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 // 66-char hex nodeIds in every hello/hello-ack/peer-list/tunneled-direct
 // envelope; 1.0.x peers send 16-char ids and get UPGRADE_REQUIRED.
 const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.1.0';
+// STRICT_VERSION island: when set, reject any client whose client-hello
+// `kernelVersion` is missing or below this floor (close 4426). Unlike
+// MIN_PEER_VERSION (which gates the app's own `version`, inconsistent across
+// apps) this gates the exact kernel build, so an operator can isolate a
+// single-kernel island (e.g. 4.8.1+) from older nodes that can't serve as
+// pub/sub roots. Unset (default) = no kernel-version gate.
+const MIN_KERNEL_VERSION = process.env.MIN_KERNEL_VERSION ?? null;
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 
@@ -709,6 +716,24 @@ wss.on('connection', (ws, req) => {
             `reload axona.net / the demo to upgrade`);
         } catch {}
         return;
+      }
+      // Kernel-version floor (STRICT_VERSION island): isolate older kernels
+      // that can't serve as pub/sub roots. Gated on the optional
+      // MIN_KERNEL_VERSION env; the client-hello carries `kernelVersion` (kernel
+      // ≥ 4.8.1). A missing field means a pre-4.8.1 build → rejected when the
+      // floor is set.
+      if (MIN_KERNEL_VERSION) {
+        const peerKernel = typeof msg.kernelVersion === 'string' ? msg.kernelVersion : null;
+        if (!peerKernel || !gteVersion(peerKernel, MIN_KERNEL_VERSION)) {
+          logErr('client-hello-kernel-too-old', {
+            connId: id, peerVersion, peerKernel, minKernel: MIN_KERNEL_VERSION,
+          });
+          try {
+            ws.close(CLOSE_UPGRADE_REQUIRED,
+              `kernel v${peerKernel ?? 'legacy'} below minimum v${MIN_KERNEL_VERSION}; reload to upgrade`);
+          } catch {}
+          return;
+        }
       }
       // Two-stage gate: the absolute floor (MIN_PEER_VERSION) AND the
       // namespace-aware flag-day floor for the v2.9.0 envelope (C-2/E-4).
