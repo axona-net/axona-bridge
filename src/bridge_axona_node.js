@@ -162,8 +162,7 @@ export class BridgeAxonaNode {
       engine:       this._engine,
       node:         this._node,
       nodeIdentity: this._identity,
-      // Synaptome maintenance ON (Synaptome-Maintenance-v0.1; dev decision 2026-06-29).
-      synaptomeMaintain: { kNear: 5, intervalMs: 15000, maxPerTick: 3 },
+      // synaptomeMaintain REVERTED to off (2026-06-29) — regressed Howard's suite.
     });
     await this._peer.start();
 
