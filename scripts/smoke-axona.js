@@ -12,7 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { createNodeIdentity, buildAuthHello, cbvFromNonces, WIRE_VERSION, AUTH_PROTO } from '@axona/protocol';
+import { createNodeIdentity, buildAuthHello, cbvFromNonces, WIRE_VERSION, AUTH_PROTO, KERNEL_VERSION } from '@axona/protocol';
 
 const BRIDGE_PORT = 19082;
 const BRIDGE_URL  = `ws://localhost:${BRIDGE_PORT}`;
@@ -22,6 +22,24 @@ const BRIDGE_URL  = `ws://localhost:${BRIDGE_PORT}`;
 const HEALTHZ_TOKEN = 'smoke-healthz-token';
 
 let passed = 0, failed = 0;
+// The spawned bridge, hoisted so the failure path can reap it. A smoke run
+// that exits without killing its child leaves an orphan squatting on
+// BRIDGE_PORT — every later run then dies with EADDRINUSE at startup.
+let bridgeChild = null;
+async function reapBridge() {
+  const child = bridgeChild;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((r) => child.once('exit', r));
+  try { child.kill('SIGTERM'); } catch {}
+  // The bridge's graceful shutdown can wedge and ignore SIGTERM; guarantee
+  // the port is released for the next run.
+  const grace = new Promise((r) => setTimeout(r, 1500));
+  await Promise.race([exited, grace]);
+  if (child.exitCode === null && child.signalCode === null) {
+    try { child.kill('SIGKILL'); } catch {}
+    await exited;
+  }
+}
 function check(label, condition) {
   if (condition) { console.log(`  ✓ ${label}`); passed++; }
   else           { console.log(`  ✗ ${label}`); failed++; }
@@ -71,15 +89,16 @@ async function waitForReady(check, timeoutMs = 3000) {
   }
 }
 
-// Smoke clients impersonate a compliant peer at PEER_VERSION_FOR_SMOKE.
-// Bump this if the bridge raises MIN_PEER_VERSION beyond it. The bridge's
-// client-hello gate has two checks: (1) wire major must equal the network's
-// (kernel WIRE_VERSION major, '3' as of the v0.3 flag-day — the hermetic
+// Smoke clients impersonate a compliant peer. Both admission gates are tracked
+// from the vendored kernel so the smoke stays green across flag days: (1) wire
+// major must equal the network's (kernel WIRE_VERSION major — the hermetic
 // partition axis), and (2) the reported version must clear its namespace floor
-// (MIN_KERNEL_VERSION / MIN_PEER_APP_VERSION, both 3.0.0). We pose as a current
-// v3.0.0 kernel peer.
-const PEER_VERSION_FOR_SMOKE = '3.0.0';
-const PEER_WIRE_FOR_SMOKE    = WIRE_VERSION;   // '3.0'
+// (MIN_KERNEL_VERSION / MIN_PEER_APP_VERSION). Posing as KERNEL_VERSION always
+// clears the floors, because a floor is only ever raised to a version that has
+// already shipped. (A hardcoded '3.0.0' here went stale when the floors moved
+// to 3.15.0 and the bridge rejected its own smoke with UPGRADE_REQUIRED.)
+const PEER_VERSION_FOR_SMOKE = KERNEL_VERSION;
+const PEER_WIRE_FOR_SMOKE    = WIRE_VERSION;
 
 function openClient() {
   return new Promise((resolve, reject) => {
@@ -140,6 +159,7 @@ async function main() {
 
   // ── Spin up the bridge ───────────────────────────────────────────
   const { child, identityPath, ready } = startBridge();
+  bridgeChild = child;
   try {
     await waitForReady(ready);
   } catch (err) {
@@ -250,14 +270,15 @@ async function main() {
     healthzAfter.axona.synaptomeSize === 0);
 
   // ── Tear down ────────────────────────────────────────────────────
-  child.kill('SIGTERM');
+  await reapBridge();
   try { require('node:fs').unlinkSync(identityPath); } catch {}
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
 
-main().catch(err => {
+main().catch(async (err) => {
   console.error('smoke threw:', err);
+  await reapBridge();   // never leave the spawned bridge squatting on the port
   process.exit(2);
 });

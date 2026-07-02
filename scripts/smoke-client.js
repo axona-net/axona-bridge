@@ -9,6 +9,7 @@
 // =====================================================================
 
 import { WebSocket } from 'ws';
+import { KERNEL_VERSION, WIRE_VERSION } from '@axona/protocol';
 
 const BRIDGE = process.env.BRIDGE ?? 'ws://localhost:8080';
 const N      = Number.parseInt(process.env.N ?? '5', 10);
@@ -21,6 +22,9 @@ const rtts = [];
 
 ws.on('open', () => {
   console.log(`[open] connected to ${BRIDGE}`);
+  // Admission gate: the bridge closes (4426) any socket that doesn't identify
+  // itself. Track the vendored kernel so this stays green across flag days.
+  ws.send(JSON.stringify({ type: 'client-hello', version: KERNEL_VERSION, wireVersion: WIRE_VERSION }));
   const timer = setInterval(() => {
     if (sent >= N) {
       clearInterval(timer);

@@ -21,6 +21,7 @@
 // =====================================================================
 
 import { WebSocket } from 'ws';
+import { KERNEL_VERSION, WIRE_VERSION } from '@axona/protocol';
 
 const BRIDGE = process.env.BRIDGE ?? 'ws://localhost:8080';
 const failures = [];
@@ -38,7 +39,12 @@ function open(label) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(BRIDGE);
     const events = [];
-    ws.on('open', () => resolve({ ws, events, label }));
+    ws.on('open', () => {
+      // Admission gate: identify as a compliant peer or the bridge closes 4426.
+      // Track the vendored kernel so this stays green across flag days.
+      ws.send(JSON.stringify({ type: 'client-hello', version: KERNEL_VERSION, wireVersion: WIRE_VERSION }));
+      resolve({ ws, events, label });
+    });
     ws.on('error', reject);
     ws.on('message', (data) => {
       try { events.push(JSON.parse(data.toString())); }
