@@ -200,7 +200,13 @@ axona-bridge/
 └── README.md
 ```
 
-The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#v2.31.0`; bump that tag and regenerate `package-lock.json` (the lock must track the pin) when moving the bridge to a new kernel.
+The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#<tag>`. To move the bridge to a new kernel, run the release ritual:
+
+```bash
+scripts/repin-kernel.sh v4.17.0        # re-pin + lockfile + npm test gate + version bump + commit
+```
+
+It regenerates `package-lock.json` (the lock must track the pin), verifies the lockfile reproduces with `npm ci`, and **refuses to commit unless `npm test` (the embedded-peer smoke) passes** — then leaves push and droplet deploy as deliberate manual steps.
 
 ## Deployment
 
