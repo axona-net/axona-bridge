@@ -47,6 +47,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { startDirectoryPublisher } from './bridge_directory.js';
 import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
+import { selectAnchors }   from './anchor_select.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
 // Derive from package.json so /healthz never drifts from the deployed build
@@ -235,6 +236,20 @@ const IDLE_CHECK_INTERVAL_MS  =  5_000;
 let connSeq = 0;
 /** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
 const connections = new Map();
+
+// ── W2 bridge bootstrap-nursery ────────────────────────────────────────
+// Instead of handing every newcomer the full admitted peer-list, introduce
+// it to a BOUNDED, curated, load-spread, keyspace-diverse anchor set (the
+// newcomer self-expands into the rest of the mesh via mesh-relayed signalling,
+// proven bridgeless). Sim-validated in dht-sim (results/w2). Reversible:
+// BRIDGE_NURSERY=off restores the full-list behaviour; and selection auto-falls
+// back to the full list whenever fewer than k anchors are eligible (cold/small
+// network), so bootstrap never starves.
+const NURSERY_ON            = (process.env.BRIDGE_NURSERY ?? 'on') !== 'off';
+const ANCHOR_K              = parseInt(process.env.BRIDGE_ANCHOR_K ?? '8', 10);
+const ANCHOR_MIN_UPTIME_MS  = parseInt(process.env.BRIDGE_ANCHOR_MIN_UPTIME_MS ?? '15000', 10);
+let   nurseryIntros   = 0;   // curated introductions served
+let   nurseryFellBack = 0;   // introductions that fell back to the full list
 
 // ── Structured JSON logging ──────────────────────────────────────────
 function log(event, extra = {}) {
@@ -430,6 +445,12 @@ const httpServer = http.createServer((req, res) => {
         uptimeS:        Math.floor((Date.now() - startTs) / 1000),
         version:        VERSION,
         kernelVersion:  KERNEL_VERSION,
+        nursery: {
+          on:        NURSERY_ON,
+          k:         ANCHOR_K,
+          intros:    nurseryIntros,
+          fellBack:  nurseryFellBack,   // intros that used the full list (cold/small net)
+        },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
           region:         bridgeNode.identity.region.label,
@@ -640,12 +661,33 @@ wss.on('connection', (ws, req) => {
       turn,
     });
 
-    // 2. Tell the new peer about everyone ALREADY admitted.
-    const admittedPeers = [];
-    for (const [otherId, otherConn] of connections) {
-      if (otherId === id) continue;
-      if (!otherConn.admitted) continue;
-      admittedPeers.push(otherId);
+    // 2. Introduce the newcomer to a BOUNDED, curated anchor set (W2 nursery)
+    //    rather than the full admitted list — it self-expands via the mesh.
+    //    BRIDGE_NURSERY=off, or too few eligible anchors, → full list.
+    let admittedPeers;
+    if (NURSERY_ON) {
+      const cands = [];
+      for (const [otherId, oc] of connections) {
+        cands.push({ id: otherId, admitted: oc.admitted, since: oc.since, anchorUses: oc.anchorUses || 0 });
+      }
+      const sel = selectAnchors(cands, {
+        newId: id, now: Date.now(), k: ANCHOR_K, minUptimeMs: ANCHOR_MIN_UPTIME_MS,
+      });
+      admittedPeers = sel.anchors;
+      // Record usage so the anti-concentration penalty spreads future intros.
+      for (const aid of admittedPeers) {
+        const ac = connections.get(aid);
+        if (ac) ac.anchorUses = (ac.anchorUses || 0) + 1;
+      }
+      nurseryIntros++;
+      if (sel.fellBack) nurseryFellBack++;
+    } else {
+      admittedPeers = [];
+      for (const [otherId, otherConn] of connections) {
+        if (otherId === id) continue;
+        if (!otherConn.admitted) continue;
+        admittedPeers.push(otherId);
+      }
     }
     sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
 
