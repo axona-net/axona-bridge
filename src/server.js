@@ -248,6 +248,12 @@ const connections = new Map();
 const NURSERY_ON            = (process.env.BRIDGE_NURSERY ?? 'on') !== 'off';
 const ANCHOR_K              = parseInt(process.env.BRIDGE_ANCHOR_K ?? '8', 10);
 const ANCHOR_MIN_UPTIME_MS  = parseInt(process.env.BRIDGE_ANCHOR_MIN_UPTIME_MS ?? '15000', 10);
+// Bounding only engages once the eligible pool is comfortably larger than k
+// (default 3·k). Below this the bridge hands the full list — so the nursery is
+// inert on small networks (a 9-relay testnet never bounds) and auto-engages only
+// at scale. Prevents dropping critical nodes on a network too small to have
+// redundancy (which broke cross-region delivery when k≈network size).
+const ANCHOR_MIN_POOL       = parseInt(process.env.BRIDGE_ANCHOR_MIN_POOL ?? String(ANCHOR_K * 3), 10);
 let   nurseryIntros   = 0;   // curated introductions served
 let   nurseryFellBack = 0;   // introductions that fell back to the full list
 
@@ -448,8 +454,10 @@ const httpServer = http.createServer((req, res) => {
         nursery: {
           on:        NURSERY_ON,
           k:         ANCHOR_K,
+          minPool:   ANCHOR_MIN_POOL,   // eligible pool needed before bounding engages
           intros:    nurseryIntros,
-          fellBack:  nurseryFellBack,   // intros that used the full list (cold/small net)
+          fellBack:  nurseryFellBack,   // intros that used the full list (small net / below minPool)
+          bounded:   nurseryIntros - nurseryFellBack,
         },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
@@ -671,7 +679,8 @@ wss.on('connection', (ws, req) => {
         cands.push({ id: otherId, admitted: oc.admitted, since: oc.since, anchorUses: oc.anchorUses || 0 });
       }
       const sel = selectAnchors(cands, {
-        newId: id, now: Date.now(), k: ANCHOR_K, minUptimeMs: ANCHOR_MIN_UPTIME_MS,
+        newId: id, now: Date.now(), k: ANCHOR_K,
+        minUptimeMs: ANCHOR_MIN_UPTIME_MS, minPool: ANCHOR_MIN_POOL,
       });
       admittedPeers = sel.anchors;
       // Record usage so the anti-concentration penalty spreads future intros.

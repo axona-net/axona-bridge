@@ -23,12 +23,22 @@ function pool(count, { region = (i) => i % 6, ageMs = 60_000 } = {}) {
   }));
 }
 
-// 1. bounded to k
+// 1. bounded to k (pool comfortably above minPool = 3k = 24)
 {
-  const cands = pool(20);
+  const cands = pool(30);
   const { anchors, fellBack } = selectAnchors(cands, { newId: 'new', now: NOW, k: 8, minUptimeMs: 15000 });
   ok('returns exactly k=8 anchors', anchors.length === 8, `(${anchors.length})`);
-  ok('not a fallback when 20 eligible', fellBack === false);
+  ok('not a fallback when 30 eligible (> 3k)', fellBack === false);
+}
+
+// 1b. min-pool threshold: a pool larger than k but below 3k does NOT bound
+{
+  const cands = pool(20); // 20 eligible, k=8 → below minPool 24 → full list
+  const { anchors, fellBack } = selectAnchors(cands, { newId: 'new', now: NOW, k: 8, minUptimeMs: 15000 });
+  ok('20 eligible (>k but <3k) → NOT bounded, full list', fellBack === true && anchors.length === 20);
+  // explicit minPool override still respected
+  const bounded = selectAnchors(cands, { newId: 'new', now: NOW, k: 8, minUptimeMs: 15000, minPool: 10 });
+  ok('minPool=10 override → bounds a 20-pool to k', bounded.fellBack === false && bounded.anchors.length === 8);
 }
 
 // 2. uptime gate
@@ -52,7 +62,7 @@ function pool(count, { region = (i) => i % 6, ageMs = 60_000 } = {}) {
   // rotated OUT in favour of low-usage peers.
   const cands = pool(12, { region: () => 0 }); // single region so load dominates
   for (let i = 0; i < 4; i++) cands[i].anchorUses = 100;
-  const { anchors } = selectAnchors(cands, { newId: 'new', now: NOW, k: 8, minUptimeMs: 15000, wLoad: 0.35 });
+  const { anchors } = selectAnchors(cands, { newId: 'new', now: NOW, k: 8, minUptimeMs: 15000, wLoad: 0.35, minPool: 1 });
   const heavyChosen = anchors.filter(a => cands.slice(0, 4).some(c => c.id === a)).length;
   ok('heavily-used anchors mostly excluded', heavyChosen <= 1, `(heavy chosen=${heavyChosen})`);
 }
@@ -60,7 +70,7 @@ function pool(count, { region = (i) => i % 6, ageMs = 60_000 } = {}) {
 // 5. keyspace diversity: distinct regions preferred
 {
   const cands = pool(12, { region: (i) => i % 6 }); // 6 regions, 2 each
-  const { anchors } = selectAnchors(cands, { newId: 'new', now: NOW, k: 6, minUptimeMs: 15000 });
+  const { anchors } = selectAnchors(cands, { newId: 'new', now: NOW, k: 6, minUptimeMs: 15000, minPool: 1 });
   const regions = new Set(anchors.map(a => a.slice(0, 2)));
   ok('picks all 6 distinct regions for k=6', regions.size === 6, `(regions=${regions.size})`);
 }

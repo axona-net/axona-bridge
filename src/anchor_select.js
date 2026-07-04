@@ -30,15 +30,22 @@ const regionKey = (idHex) => (typeof idHex === 'string' ? idHex.slice(0, 2) : ''
  * @returns {{anchors:string[], fellBack:boolean, eligibleCount:number}}
  */
 export function selectAnchors(candidates, {
-  newId, now, k = 8, minUptimeMs = 15000, wLoad = 0.35,
+  newId, now, k = 8, minUptimeMs = 15000, wLoad = 0.35, minPool = k * 3,
 } = {}) {
   const admitted = candidates.filter(c => c.admitted && c.id !== newId);
   const eligible = admitted.filter(c => (now - c.since) >= minUptimeMs);
 
-  // Cold/small-network SAFETY: if we can't field k eligible anchors, fall back
-  // to the full admitted set so mesh bootstrap never starves. This is what makes
-  // the change safe to deploy to a small/just-restarted testnet.
-  if (eligible.length < k) {
+  // Only ENGAGE bounding when the eligible pool is comfortably larger than k
+  // (default ≥ 3·k). Bounding a network barely larger than k is all cost / no
+  // benefit: it drops critical nodes with no redundancy to absorb the loss.
+  // (Observed live — on a 9-relay testnet with k=8 the nursery dropped the one
+  // relay rooting a cross-region topic and broke that direction's delivery; the
+  // sim couldn't model the cross-region-root-over-slow-ICE dynamic.) Below the
+  // threshold — including a cold/small/just-restarted network — hand the full
+  // list so bootstrap and cross-region convergence never starve. The nursery is
+  // thus inert on small networks and auto-engages only at the scale the sim
+  // proved it helps.
+  if (eligible.length < minPool) {
     return { anchors: admitted.map(c => c.id), fellBack: true, eligibleCount: eligible.length };
   }
 
