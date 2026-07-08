@@ -237,6 +237,49 @@ let connSeq = 0;
 /** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
 const connections = new Map();
 
+// ── Event-loop stall detection ──────────────────────────────────────
+// Prod finding (2026-07-08): under soak churn the bridge process's event loop
+// stalled for 15s+ — inbound WS frames (client-hellos AND pings) sat unread in
+// socket buffers, then every timer fired at once on resumption. Result:
+// `client-hello-timeout` closes for clients whose hello was ALREADY BUFFERED,
+// and same-millisecond batches of `idle-kick` against clients that had sent
+// dozens of on-schedule pings (lastPings 40-57 — provably not idle). Rule: a
+// client must never be judged by time the loop wasn't listening. The sampler
+// below measures loop lag (1s heartbeat drift); a stall ≥ STALL_MIN_MS is
+// logged LOUDLY with heap/rss (this is diagnosis, not masking — the stall
+// itself is the disease and its source is the open investigation), and the
+// hello/idle judgments grant one stall-aware grace round so buffered frames
+// get processed before anyone is kicked.
+const STALL_MIN_MS      = 2_000;      // heartbeat drift that counts as a stall
+const STALL_SAMPLE_MS   = 1_000;      // heartbeat cadence
+let   lastHeartbeatAt   = Date.now();
+let   lastStallEndAt    = 0;          // when the most recent stall ended (loop resumed)
+let   lastStallMs       = 0;
+let   maxStallMs        = 0;
+let   stallCount        = 0;
+setInterval(() => {
+  const now = Date.now();
+  const lag = now - lastHeartbeatAt - STALL_SAMPLE_MS;
+  lastHeartbeatAt = now;
+  if (lag >= STALL_MIN_MS) {
+    stallCount++;
+    lastStallMs    = lag;
+    lastStallEndAt = now;
+    if (lag > maxStallMs) maxStallMs = lag;
+    const mu = process.memoryUsage();
+    logErr('loop-stall', {
+      lagMs:      lag,
+      heapUsedMB: Math.round(mu.heapUsed / 1048576),
+      rssMB:      Math.round(mu.rss / 1048576),
+      externalMB: Math.round((mu.external || 0) / 1048576),
+      connections: connections.size,
+    });
+  }
+}, STALL_SAMPLE_MS);
+// A judgment window is tainted if a stall ended inside it — the peer's frames
+// for that window may have been buffered, not absent.
+const stallTaintedSince = (sinceTs) => lastStallEndAt >= sinceTs;
+
 // ── W2 bridge bootstrap-nursery ────────────────────────────────────────
 // Instead of handing every newcomer the full admitted peer-list, introduce
 // it to a BOUNDED, curated, load-spread, keyspace-diverse anchor set (the
@@ -470,6 +513,15 @@ const httpServer = http.createServer((req, res) => {
           known:   bridgeBook ? bridgeBook.count : 0,
         },
         uplink: bridgeNode.uplinkStatus(),
+        // Event-loop health — the smoking gun for admission drops under load.
+        // A counter that silently reads zero is worse than no counter; these
+        // are live gauges from the stall sampler.
+        loop: {
+          stalls:       stallCount,
+          maxStallMs,
+          lastStallMs,
+          lastStallAgoS: lastStallEndAt ? Math.floor((Date.now() - lastStallEndAt) / 1000) : null,
+        },
       });
     }
     res.writeHead(200, {
@@ -635,15 +687,27 @@ wss.on('connection', (ws, req) => {
     serverT:        Date.now(),
   });
 
-  conn.helloTimer = setTimeout(() => {
+  const onHelloTimeout = () => {
     if (conn.admitted) return;
+    // Stall-aware grace: if the event loop stalled during this connection's
+    // hello window, the client's hello may be sitting UNREAD in the socket
+    // buffer — closing now would punish it for our stall (the prod failure
+    // mode). Re-arm once; the buffered hello is normally processed as the
+    // loop drains, well before the retry fires.
+    if (!conn.helloRetried && stallTaintedSince(conn.since)) {
+      conn.helloRetried = true;
+      log('client-hello-grace', { connId: id, stallMs: lastStallMs });
+      conn.helloTimer = setTimeout(onHelloTimeout, HELLO_TIMEOUT_MS);
+      return;
+    }
     logErr('client-hello-timeout', { connId: id, ms: HELLO_TIMEOUT_MS });
     try {
       ws.close(CLOSE_UPGRADE_REQUIRED,
         `client-hello not received within ${HELLO_TIMEOUT_MS}ms; ` +
         `min peer v${MIN_PEER_VERSION} required`);
     } catch {}
-  }, HELLO_TIMEOUT_MS);
+  };
+  conn.helloTimer = setTimeout(onHelloTimeout, HELLO_TIMEOUT_MS);
 
   function admitConnection() {
     clearTimeout(conn.helloTimer);
@@ -926,6 +990,16 @@ wss.on('connection', (ws, req) => {
 // peer-left to the rest of the mesh.
 function sweepIdleConnections() {
   const now = Date.now();
+  // Stall-aware grace: if the event loop stalled inside this idle window, the
+  // liveness stamps are stale because WE weren't reading — pings were arriving
+  // (prod capture: kicked clients showed lastPings 40-57). Skip the sweep
+  // until the stall is outside the idle window; drained frames re-stamp
+  // liveness in the meantime, and genuinely-dead peers are kicked as soon as
+  // sweeps resume (≤ IDLE_TIMEOUT_MS + one check interval after the stall).
+  if (stallTaintedSince(now - IDLE_TIMEOUT_MS)) {
+    log('idle-sweep-skipped', { reason: 'loop-stall', stallMs: lastStallMs });
+    return;
+  }
   const toKick = [];
   for (const [id, conn] of connections) {
     const idleMs = now - conn.lastSeenAt;
