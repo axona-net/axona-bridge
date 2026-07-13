@@ -230,8 +230,10 @@ function makeTurnCredential(_peerId) {
 // WebSocket close frame, so the OS never told us the peer left.  Set
 // generously enough (15s = 15 missed pings) that brief network
 // hiccups don't false-positive.
-const IDLE_TIMEOUT_MS         = 15_000;
-const IDLE_CHECK_INTERVAL_MS  =  5_000;
+// Env-overridable so the loop-stall smoke can compress the idle window;
+// production runs the defaults.
+const IDLE_TIMEOUT_MS         = Number.parseInt(process.env.IDLE_TIMEOUT_MS ?? '15000', 10);
+const IDLE_CHECK_INTERVAL_MS  = Number.parseInt(process.env.IDLE_CHECK_INTERVAL_MS ?? '5000', 10);
 
 let connSeq = 0;
 /** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
@@ -279,6 +281,20 @@ setInterval(() => {
 // A judgment window is tainted if a stall ended inside it — the peer's frames
 // for that window may have been buffered, not absent.
 const stallTaintedSince = (sinceTs) => lastStallEndAt >= sinceTs;
+// Timer-ordering hazard: on loop resumption Node fires expired timers in
+// due-time order, so a hello timer or the idle sweep can run BEFORE the
+// sampler's tick has recorded the stall — stallTaintedSince would then read a
+// stale lastStallEndAt and judge anyway. A judgment site must therefore also
+// check for a stall the sampler hasn't seen yet: heartbeat drift beyond the
+// stall threshold means we are inside that gap right now.
+const stallPending = (now) => now - lastHeartbeatAt - STALL_SAMPLE_MS >= STALL_MIN_MS;
+// Test hook (scripts/smoke-loop-stall.js): lets the smoke reproduce the prod
+// stall on demand via GET /__test/stall — a synchronous busy-wait that blocks
+// this very event loop, exactly the condition the grace paths above defend
+// against (kernel invariant I-5: a client is never judged by time the server
+// wasn't listening). Dead unless the operator sets BRIDGE_TEST_STALL=on;
+// never set it in a deployed environment.
+const TEST_STALL_ON = process.env.BRIDGE_TEST_STALL === 'on';
 
 // ── W2 bridge bootstrap-nursery ────────────────────────────────────────
 // Instead of handing every newcomer the full admitted peer-list, introduce
@@ -465,6 +481,24 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, cors);
     res.end();
+    return;
+  }
+
+  // ── /__test/stall — deliberately block the event loop (smoke only) ─
+  // Gated on BRIDGE_TEST_STALL=on (see TEST_STALL_ON above); 404s otherwise.
+  if (TEST_STALL_ON && req.url?.startsWith('/__test/stall')) {
+    const ms = Math.min(15_000, Number.parseInt(
+      new URL(req.url, 'http://localhost').searchParams.get('ms') ?? '3500', 10));
+    logErr('test-stall-begin', { ms });
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* synchronous busy-wait — the stall IS the point */ }
+    const body = JSON.stringify({ stalledMs: ms });
+    res.writeHead(200, {
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      ...cors,
+    });
+    res.end(body);
     return;
   }
 
@@ -694,7 +728,7 @@ wss.on('connection', (ws, req) => {
     // buffer — closing now would punish it for our stall (the prod failure
     // mode). Re-arm once; the buffered hello is normally processed as the
     // loop drains, well before the retry fires.
-    if (!conn.helloRetried && stallTaintedSince(conn.since)) {
+    if (!conn.helloRetried && (stallTaintedSince(conn.since) || stallPending(Date.now()))) {
       conn.helloRetried = true;
       log('client-hello-grace', { connId: id, stallMs: lastStallMs });
       conn.helloTimer = setTimeout(onHelloTimeout, HELLO_TIMEOUT_MS);
@@ -996,7 +1030,7 @@ function sweepIdleConnections() {
   // until the stall is outside the idle window; drained frames re-stamp
   // liveness in the meantime, and genuinely-dead peers are kicked as soon as
   // sweeps resume (≤ IDLE_TIMEOUT_MS + one check interval after the stall).
-  if (stallTaintedSince(now - IDLE_TIMEOUT_MS)) {
+  if (stallTaintedSince(now - IDLE_TIMEOUT_MS) || stallPending(now)) {
     log('idle-sweep-skipped', { reason: 'loop-stall', stallMs: lastStallMs });
     return;
   }
