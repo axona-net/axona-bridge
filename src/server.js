@@ -910,6 +910,25 @@ wss.on('connection', (ws, req) => {
     }
 
     switch (msg.type) {
+      // Mesh re-warm bootstrap (kernel #332, facet 2): an established peer
+      // whose WebRTC mesh dissolved has an empty routing table, so its
+      // self-integration can't find anyone — the join-time peer-list was a
+      // one-shot. On request, resend the current admitted peer-list; the
+      // client's mesh layer re-initiates to everyone it lacks. Rate-limited
+      // client-side (kernel MESH_REWARM_COOLDOWN_MS); harmless if repeated.
+      case 'peer-list-request': {
+        if (!conn.admitted) break;
+        const admittedPeers = [];
+        for (const [otherId, otherConn] of connections) {
+          if (otherId === id) continue;
+          if (!otherConn.admitted) continue;
+          admittedPeers.push(otherId);
+        }
+        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+        log('peer-list-rerequest', { connId: id, peers: admittedPeers.length });
+        break;
+      }
+
       case 'ping': {
         conn.pings++;
         try {
