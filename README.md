@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.25.0**, embedding kernel **v2.43.0** (`axona/5` wire epoch). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub.
+**v2.83.0**, embedding the kernel **4.29.x line** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub. The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -34,7 +34,7 @@ containers? `cp .env.docker.example .env && docker compose up -d --build`
 What the bridge does today:
 
 - **Signaling.** `peer-list`, `peer-joined`, `peer-left`, and opaque `signal` relay so peers can negotiate WebRTC DataChannels. After the channel opens they talk directly; the bridge is no longer in the data path. It also relays **mesh signaling** so peers can form *bridgeless* links through each other.
-- **Authenticated admission + version gate.** Every connection runs the kernel's `axona/5` authenticated handshake. A `client-hello` is checked against `REQUIRED_WIRE_MAJOR` (=2) and a `flagDayFloor()` (kernel-namespace floor `MIN_KERNEL_VERSION` for 2.x, peer-app floor `MIN_PEER_APP_VERSION` for ≥3.x); a peer below the floor or on the wrong wire epoch is closed with **4426** (`upgrade required`). Production and testnet both run `axona/5` since the 2026-06-08 cutover; a peer on the retired `axona/4` epoch is partitioned out by design.
+- **Authenticated admission + version gate.** Every connection runs the kernel's `axona/5` authenticated handshake. A `client-hello` is checked against `REQUIRED_WIRE_MAJOR` (=4) and the kernel-version floor; a peer below the floor or on the wrong wire epoch is closed with **4426** (`upgrade required`). Peers on retired wire epochs are partitioned out by design.
 - **Embedded protocol participant.** Persistent nodeId, NH-1 routing primitives over WebSocket, pub/sub root. `/healthz` and `/diag` surface the bridge nodeId, synaptome size, and the embedded **kernel version**.
 - **TURN credential minting.** Hands browsers short-lived TURN credentials (the `draft-uberti-rtcweb-turn-rest` scheme, validated by self-hosted **coturn** in `use-auth-secret` mode) so WebRTC works across restrictive NATs.
 
@@ -53,7 +53,7 @@ Identity persists in `bridge-identity.json` (override path with `BRIDGE_IDENTITY
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.15.0"}
+# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.83.0"}
 ```
 
 Smoke tests:
@@ -71,7 +71,7 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"2.15.0","kernelVersion":"2.32.0",…}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.83.0","kernelVersion":"4.29.0",…}
 ```
 
 ## Wire format
@@ -143,9 +143,9 @@ Env vars (see `.env.example`):
 |---|---|---|
 | `PORT` | `8080` | TCP port to listen on |
 | `LOG_LEVEL` | `info` | `debug` logs every ping/pong and signal relay (verbose) |
-| `REQUIRED_WIRE_MAJOR` | `2` | reject any `client-hello` not on this wire major (the `axona/5` epoch is major 2) |
-| `MIN_KERNEL_VERSION` | `2.28.0` | floor for kernel-namespace (2.x) peers; below → close 4426 |
-| `MIN_PEER_APP_VERSION` | `3.25.0` | floor for peer-app-namespace (≥3.x) peers |
+| `REQUIRED_WIRE_MAJOR` | `4` | reject any `client-hello` not on this wire major |
+| `MIN_KERNEL_VERSION` | `3.15.0` | kernel-version floor; below → close 4426 |
+| `MIN_PEER_APP_VERSION` | `3.15.0` | floor for peer-app-versioned clients |
 | `HELLO_TIMEOUT_MS` | — | how long to wait for a peer's authenticated hello before dropping |
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
 | `TURN_AUTH_SECRET` | — | shared secret for minting `use-auth-secret` TURN credentials (also read by coturn) |
@@ -194,7 +194,7 @@ axona-bridge/
 ├── Dockerfile                 # container image
 ├── docker-compose.yml         # bridge + Caddy (auto-TLS) + coturn stack
 ├── .env.docker.example        # Compose env template
-├── node_modules/@axona/protocol # kernel pinned via package.json (#v2.43.0)
+├── node_modules/@axona/protocol # kernel pinned via package.json (tagged release)
 ├── .env.example
 ├── package.json
 └── README.md
