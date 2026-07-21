@@ -59,11 +59,23 @@ export function selectAnchors(candidates, {
   }).sort((a, b) => b.s - a.s);
 
   const chosen = [], usedRegions = new Set();
+  // Pass 0: SAME-REGION AFFINITY (#362). A newcomer's region-mates are its
+  // future cohort — replica recruitment and graceful-leave heir resolution
+  // are region-homogeneous, so a node that never meshes with its region-mates
+  // becomes a SINGLETON root whose history either dies with it or gets handed
+  // to out-of-region holders that routed reads can never find (the alert-bot
+  // ~10% deterministic loss). Guarantee up to half the anchor slots to the
+  // newcomer's own region before the diversity pass.
+  const newRegion = regionKey(newId);
+  for (const { id } of scored) {
+    if (chosen.length >= Math.max(1, Math.floor(k / 2))) break;
+    if (regionKey(id) === newRegion) { chosen.push(id); usedRegions.add(newRegion); }
+  }
   // Pass 1: highest score in a not-yet-used keyspace region (diversity).
   for (const { id } of scored) {
     if (chosen.length >= k) break;
     const r = regionKey(id);
-    if (!usedRegions.has(r)) { chosen.push(id); usedRegions.add(r); }
+    if (!usedRegions.has(r) && !chosen.includes(id)) { chosen.push(id); usedRegions.add(r); }
   }
   // Pass 2: fill remaining slots with the next-highest scorers.
   for (const { id } of scored) {

@@ -796,6 +796,19 @@ wss.on('connection', (ws, req) => {
         admittedPeers.push(otherId);
       }
     }
+    // SAME-REGION FIRST (#362): the kernel dials the list in order and only
+    // the first few ICE negotiations complete inside the connect window, so
+    // list order decides which mesh links actually form. A newcomer that
+    // never links its region-mates can't recruit an in-region cohort or
+    // resolve an in-region heir — its sole-copy topics die with it or strand
+    // on out-of-region holders routed reads never find (the alert-bot loss).
+    // Stable partition: region-mates keep their relative order up front, the
+    // rest follow unchanged.
+    const newcomerRegion = typeof id === 'string' ? id.slice(0, 2) : '';
+    admittedPeers = [
+      ...admittedPeers.filter((p) => typeof p === 'string' && p.slice(0, 2) === newcomerRegion),
+      ...admittedPeers.filter((p) => !(typeof p === 'string' && p.slice(0, 2) === newcomerRegion)),
+    ];
     sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
 
     // 3. Tell existing admitted peers that someone new arrived.
