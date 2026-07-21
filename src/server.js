@@ -1010,19 +1010,38 @@ wss.on('connection', (ws, req) => {
     }
     connections.delete(id);
 
+    // Departure hint (#364-B, TEMPORARY testnet-era crutch): capture the
+    // authenticated nodeId bound to this connection BEFORE handleConnClosed
+    // clears the binding, and include it in the peer-left broadcast. Peers
+    // use it to purge the departed node's pub/sub ghosts (beacons, table
+    // entries) immediately instead of waiting hours for natural forgetting.
+    // Today every node holds its bridge socket for its whole session, so a
+    // socket close ≈ the node is gone. Once nodes graduate and legitimately
+    // drop their bridge socket while remaining valid mesh members, this hint
+    // becomes inaccurate — receivers therefore ignore it whenever they hold
+    // a live channel to the subject, which keeps it safe to leave in place.
+    let departedNodeId = null;
+    try {
+      const bound = bridgeNode.transport?.nodeIdFor?.(id);
+      if (typeof bound === 'bigint') departedNodeId = bound.toString(16).padStart(66, '0');
+      else if (typeof bound === 'string') departedNodeId = bound;
+    } catch { /* unbound (pre-hello) connection — no hint to give */ }
+
     // Let the embedded Axona node clean up its bindings + reject any
     // pending requests to this peer.
     bridgeNode.handleConnClosed(id);
 
     // Tell everyone remaining that this peer is gone.  They'll tear
-    // down their RTCPeerConnection for this id.
+    // down their RTCPeerConnection for this id (and, when nodeId is
+    // present, purge the departed node's pub/sub ghosts).
     const notifiedCount = broadcast(
-      { type: 'peer-left', peerId: id, serverT: Date.now() },
+      { type: 'peer-left', peerId: id, nodeId: departedNodeId ?? undefined, serverT: Date.now() },
       null,   // peer is already removed from the registry
     );
 
     log('disconnect', {
       connId:    id,
+      nodeId:    departedNodeId ? departedNodeId.slice(0, 12) : null,   // departure-hint subject (#364-B)
       code,
       reason:    reason?.toString() ?? '',
       lifeS,
