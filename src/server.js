@@ -48,6 +48,7 @@ import { startDirectoryPublisher } from './bridge_directory.js';
 import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
 import { selectAnchors }   from './anchor_select.js';
+import { selectGraduate }  from './graduation_select.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
 // Derive from package.json so /healthz never drifts from the deployed build
@@ -236,7 +237,7 @@ const IDLE_TIMEOUT_MS         = Number.parseInt(process.env.IDLE_TIMEOUT_MS ?? '
 const IDLE_CHECK_INTERVAL_MS  = Number.parseInt(process.env.IDLE_CHECK_INTERVAL_MS ?? '5000', 10);
 
 let connSeq = 0;
-/** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string}>} */
+/** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string, meshBound: number|null, meshBoundAt: number}>} */
 const connections = new Map();
 
 // ── Event-loop stall detection ──────────────────────────────────────
@@ -331,7 +332,29 @@ const GRADUATION_MIN_UPTIME_MS = parseInt(process.env.BRIDGE_GRADUATION_MIN_UPTI
 // would just reconnect-storm. Set to the kernel release that ships graduation
 // handling (webTransport GRADUATED_CLOSE_CODE). Non-flag-day: old clients count
 // toward the cap but are never force-dropped.
+// Floor to honour the 4200 graceful-close: below this a client would just
+// reconnect-storm, so it's never force-dropped. UNCHANGED by vitality work —
+// 4.35–4.37 clients graduate fine (they just use the uptime fallback below).
 const GRADUATION_MIN_KERNEL = process.env.BRIDGE_GRADUATION_MIN_KERNEL ?? '4.35.0';
+// Vitality-based graduation (#374). A peer reports its live mesh size
+// (`meshBound`) on the heartbeat (kernel ≥4.38); the bridge graduates the
+// BEST-meshed peer in the most over-represented region — the node the mesh can
+// most afford to lose — instead of guessing from uptime. The vitality path is
+// gated on the PRESENCE of a fresh report, not a version string, so peers that
+// don't report (older kernels, or not-yet-pinged) transparently fall back to
+// the uptime proxy and a mixed fleet degrades gracefully.
+// Minimum reported meshBound to be graduation-eligible. One above the client
+// floor (graduationMeshFloor=3) so a graduate keeps ≥3 even if one channel
+// drops concurrently with the freed bridge slot.
+const GRADUATION_SAFE_FLOOR  = parseInt(process.env.BRIDGE_GRADUATION_SAFE_FLOOR ?? '4', 10);
+// A meshBound report older than this is stale → treated as unknown (fall back
+// to the uptime proxy for that peer). ~2× the client ping interval.
+const GRADUATION_VITALITY_TTL_MS = parseInt(process.env.BRIDGE_GRADUATION_VITALITY_TTL_MS ?? '20000', 10);
+// Hard uptime ceiling: a peer that has held its slot this long is graduated on
+// the uptime proxy even if it never reported a graduatable meshBound — bounds
+// the one-slot capacity cost of a peer that under-reports to keep its slot.
+// Still never drops a region to its last representative.
+const GRADUATION_MAX_NURSERY_MS = parseInt(process.env.BRIDGE_GRADUATION_MAX_NURSERY_MS ?? '600000', 10);
 /** Close code the client reads as "graduated — stay meshed, don't reconnect". */
 const CLOSE_GRADUATED = 4200;
 // Anti-storm pacing. Graduating many peers at once thins the mesh (they all lose
@@ -449,6 +472,12 @@ function connNodeHex(connId) {
     return nid == null ? null : idToHex(nid);
   } catch { return null; }
 }
+/** The peer's live mesh size (vitality) IF it reported one recently, else null.
+ *  A stale or absent report → null → the caller falls back to the uptime proxy. */
+function freshMeshBound(c, now) {
+  return (c.meshBound != null && (now - c.meshBoundAt) < GRADUATION_VITALITY_TTL_MS)
+    ? c.meshBound : null;
+}
 
 function maybeGraduate() {
   if (!NURSERY_ON) return;                          // shares the nursery kill-switch
@@ -459,38 +488,37 @@ function maybeGraduate() {
   for (const [cid, c] of connections) if (c.admitted) admitted.push([cid, c]);
   if (admitted.length <= CLOSE_GRADUATED_HIGH) return;           // hysteresis: only above cap+slack
 
-  // Region spread by *nodeId* keyspace region (not the bridge connId), so the
-  // keep-set stays keyspace-diverse and we graduate from the most-redundant.
-  const regionCount = new Map();
-  for (const [cid] of admitted) { const r = connRegion(cid); if (r) regionCount.set(r, (regionCount.get(r) || 0) + 1); }
-
-  const eligible = admitted.filter(([cid, c]) => {
-    if ((now - c.since) < GRADUATION_MIN_UPTIME_MS) return false;                    // time to mesh
-    if (!gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL)) return false;
-    if (connRegion(cid) == null) return false;                                       // must be bound (meshed via us)
-    const nh = connNodeHex(cid);
+  // Resolve each admitted connection into a pure descriptor, then let the
+  // keyspace-balance + vitality selection (graduation_select.js) pick the winner.
+  const candidates = admitted.map(([cid, c]) => {
+    const nh  = connNodeHex(cid);
     const gAt = graduatedRecently.get(nh);
-    if (gAt != null && now - gAt < GRADUATION_COOLDOWN_MS) return false;              // cooldown: no re-dial→re-graduate loop
-    return true;
-  });
-  if (eligible.length === 0) return;
-
-  // Most over-represented region first, oldest (best-meshed) first within it.
-  eligible.sort((a, b) => {
-    const rd = (regionCount.get(connRegion(b[0])) || 0) - (regionCount.get(connRegion(a[0])) || 0);
-    if (rd !== 0) return rd;
-    return a[1].since - b[1].since;
+    return {
+      id:         cid,
+      region:     connRegion(cid),                                             // nodeId keyspace region (null = unbound)
+      since:      c.since,
+      meshBound:  freshMeshBound(c, now),                                      // measured vitality, or null
+      kernelOk:   gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL),
+      inCooldown: gAt != null && (now - gAt) < GRADUATION_COOLDOWN_MS,
+    };
   });
 
-  const [cid, c] = eligible[0];
-  const r = connRegion(cid);
-  if ((regionCount.get(r) || 0) <= 1) return;       // never a region's last representative
-  const nh = connNodeHex(cid);
+  const pick = selectGraduate(candidates, {
+    now,
+    safeFloor:    GRADUATION_SAFE_FLOOR,
+    minUptimeMs:  GRADUATION_MIN_UPTIME_MS,
+    maxNurseryMs: GRADUATION_MAX_NURSERY_MS,
+  });
+  if (!pick) return;
+
+  const c  = connections.get(pick.id);
+  if (!c) return;
+  const nh = connNodeHex(pick.id);
   try { c.ws.close(CLOSE_GRADUATED, 'graduated — you are meshed; freeing the bridge slot'); } catch { /* dying */ }
   if (nh) graduatedRecently.set(nh, now);
   lastGraduationAt = now;
   graduatedTotal++;
-  log('peer-graduated', { connId: cid, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: r, admitted: admitted.length });
+  log('peer-graduated', { connId: pick.id, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: pick.region, meshBound: pick.meshBound, basis: pick.basis, admitted: admitted.length });
   // Prune the cooldown map so it can't grow without bound.
   if (graduatedRecently.size > 1000) for (const [k, t] of graduatedRecently) if (now - t > GRADUATION_COOLDOWN_MS) graduatedRecently.delete(k);
 }
@@ -807,6 +835,8 @@ wss.on('connection', (ws, req) => {
     admitted: false,      // flipped to true after client-hello version check
     helloTimer: null,
     peerVersion: null,
+    meshBound: null,      // last reported live mesh size (vitality); null until first ping carries it
+    meshBoundAt: 0,       // freshness stamp for meshBound
   };
   connections.set(id, conn);
 
@@ -1054,6 +1084,14 @@ wss.on('connection', (ws, req) => {
 
       case 'ping': {
         conn.pings++;
+        // Vitality-based graduation (#374): the client piggybacks its live mesh
+        // size on the heartbeat. Record it (with a freshness stamp) so
+        // maybeGraduate() releases the best-meshed peer on evidence, not a
+        // uptime guess. Ignore malformed values (old clients omit the field).
+        if (Number.isInteger(msg.meshBound) && msg.meshBound >= 0) {
+          conn.meshBound   = msg.meshBound;
+          conn.meshBoundAt = Date.now();
+        }
         try {
           ws.send(JSON.stringify({
             type:    'pong',
