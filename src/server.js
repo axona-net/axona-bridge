@@ -334,7 +334,18 @@ const GRADUATION_MIN_UPTIME_MS = parseInt(process.env.BRIDGE_GRADUATION_MIN_UPTI
 const GRADUATION_MIN_KERNEL = process.env.BRIDGE_GRADUATION_MIN_KERNEL ?? '4.35.0';
 /** Close code the client reads as "graduated — stay meshed, don't reconnect". */
 const CLOSE_GRADUATED = 4200;
+// Anti-storm pacing. Graduating many peers at once thins the mesh (they all lose
+// their bridge signalling path together) → they re-dial → get re-graduated → a
+// storm. So: only start graduating above cap+SLACK (hysteresis), graduate at
+// most ONE peer per INTERVAL (rate-limit, lets the mesh absorb each departure),
+// and don't re-graduate the same nodeId within COOLDOWN (breaks re-dial loops).
+const GRADUATION_SLACK       = parseInt(process.env.BRIDGE_GRADUATION_SLACK ?? '2', 10);
+const GRADUATION_INTERVAL_MS = parseInt(process.env.BRIDGE_GRADUATION_INTERVAL_MS ?? '3000', 10);
+const GRADUATION_COOLDOWN_MS = parseInt(process.env.BRIDGE_GRADUATION_COOLDOWN_MS ?? '60000', 10);
+const CLOSE_GRADUATED_HIGH   = MAX_PEERS + GRADUATION_SLACK;
 let   graduatedTotal  = 0;
+let   lastGraduationAt = 0;
+const graduatedRecently = new Map();   // nodeId hex → ts of last graduation (cooldown)
 
 // ── Structured JSON logging ──────────────────────────────────────────
 function log(event, extra = {}) {
@@ -423,41 +434,69 @@ function broadcast(msg, exceptId = null) {
  *  time to mesh) first within a region, and never drop a region to its last
  *  representative on the bridge. The graduated client keeps its mesh; if it
  *  wasn't truly meshed it reconnects (kernel boundPeers floor). */
+/** Keyspace region (top nodeId byte) of an admitted, bound connection — the
+ *  real diversity axis. null when the connection hasn't bound a nodeId yet
+ *  (still handshaking) — such a peer isn't graduation-eligible anyway. */
+function connRegion(connId) {
+  try {
+    const nid = bridgeNode.transport?.nodeIdFor?.(connId);
+    return nid == null ? null : idToHex(nid).slice(0, 2);
+  } catch { return null; }
+}
+function connNodeHex(connId) {
+  try {
+    const nid = bridgeNode.transport?.nodeIdFor?.(connId);
+    return nid == null ? null : idToHex(nid);
+  } catch { return null; }
+}
+
 function maybeGraduate() {
-  if (!NURSERY_ON) return;                       // shares the nursery kill-switch
+  if (!NURSERY_ON) return;                          // shares the nursery kill-switch
+  const now = Date.now();
+  if (now - lastGraduationAt < GRADUATION_INTERVAL_MS) return;   // rate-limit: ≤1 per interval
+
   const admitted = [];
   for (const [cid, c] of connections) if (c.admitted) admitted.push([cid, c]);
-  const over = admitted.length - MAX_PEERS;
-  if (over <= 0) return;
+  if (admitted.length <= CLOSE_GRADUATED_HIGH) return;           // hysteresis: only above cap+slack
 
-  const now = Date.now();
-  const regionOf = (cid) => (typeof cid === 'string' ? cid.slice(0, 2) : '');
+  // Region spread by *nodeId* keyspace region (not the bridge connId), so the
+  // keep-set stays keyspace-diverse and we graduate from the most-redundant.
   const regionCount = new Map();
-  for (const [cid] of admitted) regionCount.set(regionOf(cid), (regionCount.get(regionOf(cid)) || 0) + 1);
+  for (const [cid] of admitted) { const r = connRegion(cid); if (r) regionCount.set(r, (regionCount.get(r) || 0) + 1); }
 
-  // Eligible: established long enough AND running a kernel that honours 4200.
-  const eligible = admitted.filter(([cid, c]) =>
-    (now - c.since) >= GRADUATION_MIN_UPTIME_MS &&
-    gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL));
+  const eligible = admitted.filter(([cid, c]) => {
+    if ((now - c.since) < GRADUATION_MIN_UPTIME_MS) return false;                    // time to mesh
+    if (!gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL)) return false;
+    if (connRegion(cid) == null) return false;                                       // must be bound (meshed via us)
+    const nh = connNodeHex(cid);
+    const gAt = graduatedRecently.get(nh);
+    if (gAt != null && now - gAt < GRADUATION_COOLDOWN_MS) return false;              // cooldown: no re-dial→re-graduate loop
+    return true;
+  });
+  if (eligible.length === 0) return;
 
-  // Graduate the most-redundant, most-established first.
+  // Most over-represented region first, oldest (best-meshed) first within it.
   eligible.sort((a, b) => {
-    const rd = (regionCount.get(regionOf(b[0])) || 0) - (regionCount.get(regionOf(a[0])) || 0);
-    if (rd !== 0) return rd;                     // over-represented region first
-    return a[1].since - b[1].since;              // oldest (best-meshed) first
+    const rd = (regionCount.get(connRegion(b[0])) || 0) - (regionCount.get(connRegion(a[0])) || 0);
+    if (rd !== 0) return rd;
+    return a[1].since - b[1].since;
   });
 
-  let done = 0;
-  for (const [cid, c] of eligible) {
-    if (done >= over) break;
-    const r = regionOf(cid);
-    if ((regionCount.get(r) || 0) <= 1) continue;   // keep ≥1 of every region
-    try { c.ws.close(CLOSE_GRADUATED, 'graduated — you are meshed; freeing the bridge slot'); } catch { /* dying */ }
-    regionCount.set(r, regionCount.get(r) - 1);
-    done++; graduatedTotal++;
-    log('peer-graduated', { connId: cid, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: r });
-  }
+  const [cid, c] = eligible[0];
+  const r = connRegion(cid);
+  if ((regionCount.get(r) || 0) <= 1) return;       // never a region's last representative
+  const nh = connNodeHex(cid);
+  try { c.ws.close(CLOSE_GRADUATED, 'graduated — you are meshed; freeing the bridge slot'); } catch { /* dying */ }
+  if (nh) graduatedRecently.set(nh, now);
+  lastGraduationAt = now;
+  graduatedTotal++;
+  log('peer-graduated', { connId: cid, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: r, admitted: admitted.length });
+  // Prune the cooldown map so it can't grow without bound.
+  if (graduatedRecently.size > 1000) for (const [k, t] of graduatedRecently) if (now - t > GRADUATION_COOLDOWN_MS) graduatedRecently.delete(k);
 }
+// Drain a persistent overage even when no new peer arrives to trigger the
+// on-admit check — one graduation per interval until back within band.
+setInterval(maybeGraduate, GRADUATION_INTERVAL_MS).unref?.();
 
 // ── Embedded Axona peer (Phase 3) ────────────────────────────────────
 //
