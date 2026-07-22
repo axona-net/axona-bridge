@@ -316,6 +316,26 @@ const ANCHOR_MIN_POOL       = parseInt(process.env.BRIDGE_ANCHOR_MIN_POOL ?? Str
 let   nurseryIntros   = 0;   // curated introductions served
 let   nurseryFellBack = 0;   // introductions that fell back to the full list
 
+// ── Graduation (bridge is a bootstrap node, not a supernode) ─────────
+// The bridge holds at most MAX_PEERS admitted connections. Once a newcomer
+// pushes the count past the cap, the bridge GRADUATES established, mesh-capable
+// peers off (close code 4200): they keep their WebRTC mesh and free the scarce
+// bridge slot for whoever actually needs bootstrap. A graduated client that
+// wasn't truly meshed self-corrects by reconnecting (kernel boundPeers floor),
+// so the bridge graduates optimistically on uptime + version, never needing to
+// know the client's real mesh size. Disabled with BRIDGE_NURSERY=off.
+const MAX_PEERS = parseInt(process.env.BRIDGE_MAX_PEERS ?? '32', 10);
+// A peer must be at least this old to be graduated — time to form its mesh.
+const GRADUATION_MIN_UPTIME_MS = parseInt(process.env.BRIDGE_GRADUATION_MIN_UPTIME_MS ?? '30000', 10);
+// Only graduate clients new enough to honour the 4200 close code; older kernels
+// would just reconnect-storm. Set to the kernel release that ships graduation
+// handling (webTransport GRADUATED_CLOSE_CODE). Non-flag-day: old clients count
+// toward the cap but are never force-dropped.
+const GRADUATION_MIN_KERNEL = process.env.BRIDGE_GRADUATION_MIN_KERNEL ?? '4.35.0';
+/** Close code the client reads as "graduated — stay meshed, don't reconnect". */
+const CLOSE_GRADUATED = 4200;
+let   graduatedTotal  = 0;
+
 // ── Structured JSON logging ──────────────────────────────────────────
 function log(event, extra = {}) {
   process.stdout.write(JSON.stringify({
@@ -394,6 +414,49 @@ function broadcast(msg, exceptId = null) {
     }
   }
   return count;
+}
+
+/** Graduate established, mesh-capable peers off the bridge when the admitted
+ *  count exceeds MAX_PEERS. Keeps the bridge a bootstrap/signaling node rather
+ *  than a supernode. Selection favours KEEPING a keyspace-diverse anchor set:
+ *  we graduate from the most over-represented regions first, oldest (most
+ *  time to mesh) first within a region, and never drop a region to its last
+ *  representative on the bridge. The graduated client keeps its mesh; if it
+ *  wasn't truly meshed it reconnects (kernel boundPeers floor). */
+function maybeGraduate() {
+  if (!NURSERY_ON) return;                       // shares the nursery kill-switch
+  const admitted = [];
+  for (const [cid, c] of connections) if (c.admitted) admitted.push([cid, c]);
+  const over = admitted.length - MAX_PEERS;
+  if (over <= 0) return;
+
+  const now = Date.now();
+  const regionOf = (cid) => (typeof cid === 'string' ? cid.slice(0, 2) : '');
+  const regionCount = new Map();
+  for (const [cid] of admitted) regionCount.set(regionOf(cid), (regionCount.get(regionOf(cid)) || 0) + 1);
+
+  // Eligible: established long enough AND running a kernel that honours 4200.
+  const eligible = admitted.filter(([cid, c]) =>
+    (now - c.since) >= GRADUATION_MIN_UPTIME_MS &&
+    gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL));
+
+  // Graduate the most-redundant, most-established first.
+  eligible.sort((a, b) => {
+    const rd = (regionCount.get(regionOf(b[0])) || 0) - (regionCount.get(regionOf(a[0])) || 0);
+    if (rd !== 0) return rd;                     // over-represented region first
+    return a[1].since - b[1].since;              // oldest (best-meshed) first
+  });
+
+  let done = 0;
+  for (const [cid, c] of eligible) {
+    if (done >= over) break;
+    const r = regionOf(cid);
+    if ((regionCount.get(r) || 0) <= 1) continue;   // keep ≥1 of every region
+    try { c.ws.close(CLOSE_GRADUATED, 'graduated — you are meshed; freeing the bridge slot'); } catch { /* dying */ }
+    regionCount.set(r, regionCount.get(r) - 1);
+    done++; graduatedTotal++;
+    log('peer-graduated', { connId: cid, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: r });
+  }
 }
 
 // ── Embedded Axona peer (Phase 3) ────────────────────────────────────
@@ -535,6 +598,8 @@ const httpServer = http.createServer((req, res) => {
           intros:    nurseryIntros,
           fellBack:  nurseryFellBack,   // intros that used the full list (small net / below minPool)
           bounded:   nurseryIntros - nurseryFellBack,
+          maxPeers:  MAX_PEERS,
+          graduated: graduatedTotal,    // established peers released to free bridge slots
         },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
@@ -822,6 +887,11 @@ wss.on('connection', (ws, req) => {
     //    with an authenticated hello-ack proving its nodeId; that's
     //    when our bridge node admits this browser into its synaptome.
     bridgeNode.sendHello(id, serverNonce);
+
+    // 5. Bootstrap-nursery: the newcomer took a slot; if we're now over the
+    //    cap, graduate an established, mesh-capable peer to free one. Deferred a
+    //    tick so this newcomer's own peer-list/mesh negotiation starts first.
+    setTimeout(maybeGraduate, 0);
   }
 
   ws.on('message', (data, isBinary) => {
@@ -854,6 +924,7 @@ wss.on('connection', (ws, req) => {
       }
       const peerVersion = typeof msg.version === 'string' ? msg.version : null;
       conn.peerVersion = peerVersion;
+      conn.kernelVersion = typeof msg.kernelVersion === 'string' ? msg.kernelVersion : null;
       if (!peerVersion) {
         logErr('client-hello-missing-version', { connId: id });
         try {
