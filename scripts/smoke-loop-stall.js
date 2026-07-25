@@ -81,15 +81,12 @@ async function reapBridge() {
 }
 
 function startBridge() {
-  const identityPath = `/tmp/axona-bridge-stall-smoke-${process.pid}.json`;
-  try { unlinkSync(identityPath); } catch {}
 
   const child = spawn(process.execPath, ['src/server.js'], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       PORT: String(BRIDGE_PORT),
-      BRIDGE_IDENTITY_PATH: identityPath,
       LOG_LEVEL: 'info',
       MIN_PEER_VERSION: PEER_VERSION_FOR_SMOKE,
       HEALTHZ_TOKEN,
@@ -119,7 +116,7 @@ function startBridge() {
   };
   attach(child.stdout, 'out');
   attach(child.stderr, 'err');
-  return { child, identityPath, ready: () => started };
+  return { child, ready: () => started };
 }
 
 async function waitForReady(ready, timeoutMs = 5000) {
@@ -189,7 +186,7 @@ const triggerStall = (ms) => fetch(`${BRIDGE_HTTP}/__test/stall?ms=${ms}`);
 async function main() {
   console.log('axona-bridge loop-stall protection smoke (invariant I-5)');
 
-  const { child, identityPath, ready } = startBridge();
+  const { child, ready } = startBridge();
   bridgeChild = child;
   try {
     await waitForReady(ready);
@@ -273,7 +270,6 @@ async function main() {
   try { wsA.close(); } catch {}
   try { wsControl.close(); } catch {}
   await reapBridge();
-  try { unlinkSync(identityPath); } catch {}
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

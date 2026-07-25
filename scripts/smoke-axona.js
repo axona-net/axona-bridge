@@ -48,10 +48,8 @@ function check(label, condition) {
 function startBridge() {
   // Use a per-run identity file so the test is deterministic + the
   // bridge always has a fresh nodeId.
-  const identityPath = `/tmp/axona-bridge-smoke-${process.pid}.json`;
   try {
     const fs = require('node:fs');
-    fs.unlinkSync(identityPath);
   } catch {}
 
   const child = spawn(process.execPath, ['src/server.js'], {
@@ -59,7 +57,6 @@ function startBridge() {
     env: {
       ...process.env,
       PORT: String(BRIDGE_PORT),
-      BRIDGE_IDENTITY_PATH: identityPath,
       LOG_LEVEL: 'info',
       // Pin the gate to the version the smoke client sends.
       MIN_PEER_VERSION: PEER_VERSION_FOR_SMOKE,
@@ -78,7 +75,7 @@ function startBridge() {
   child.stderr.on('data', (chunk) => {
     if (process.env.VERBOSE) process.stderr.write('[bridge] ' + chunk.toString());
   });
-  return { child, identityPath, ready: () => started };
+  return { child, ready: () => started };
 }
 
 async function waitForReady(check, timeoutMs = 3000) {
@@ -158,7 +155,7 @@ async function main() {
   console.log('axona-bridge embedded peer smoke');
 
   // ── Spin up the bridge ───────────────────────────────────────────
-  const { child, identityPath, ready } = startBridge();
+  const { child, ready } = startBridge();
   bridgeChild = child;
   try {
     await waitForReady(ready);
@@ -271,7 +268,6 @@ async function main() {
 
   // ── Tear down ────────────────────────────────────────────────────
   await reapBridge();
-  try { require('node:fs').unlinkSync(identityPath); } catch {}
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

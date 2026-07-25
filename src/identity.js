@@ -31,7 +31,7 @@
 // bridge directory dedups + ranks on the bridge URL (not the signer), so a
 // rotating signer just re-publishes the same-URL directory entry on restart;
 // clients still discover, rank, and fail over to it. No bridge-identity.json,
-// no BRIDGE_IDENTITY_PATH.
+// and no path setting exists for one.
 // =====================================================================
 
 import { createNodeIdentity as kernelCreateNodeIdentity } from '@axona/protocol';

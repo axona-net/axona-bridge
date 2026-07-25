@@ -46,7 +46,11 @@ Configure the bridge's geographic prefix via env vars:
 BRIDGE_LAT=51.5  BRIDGE_LNG=-0.1  BRIDGE_REGION_LABEL="London"  npm start
 ```
 
-Identity persists in `bridge-identity.json` (override path with `BRIDGE_IDENTITY_PATH`).
+The bridge's transport identity is **ephemeral** — a fresh keypair and nodeId every
+start, written nowhere (INVARIANT I-ID: a nodeId that survived restarts would be a
+durable correlator for the host's IP and location, and would buy nothing back).
+The bridge directory and first-party reputation are keyed on the bridge **URL**, not
+on its signer, so clients still discover, rank, and fail over to it across restarts.
 
 ## Quickstart (local)
 
@@ -150,7 +154,6 @@ Env vars (see `.env.example`):
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
 | `TURN_AUTH_SECRET` | — | shared secret for minting `use-auth-secret` TURN credentials (also read by coturn) |
 | `BRIDGE_LAT` / `BRIDGE_LNG` / `BRIDGE_REGION_LABEL` | — | the bridge's geographic anchor (sets its S2 region prefix) |
-| `BRIDGE_IDENTITY_PATH` | `bridge-identity.json` | where the persistent Ed25519 identity is stored |
 
 ## Logging
 

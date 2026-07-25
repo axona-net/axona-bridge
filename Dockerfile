@@ -19,9 +19,9 @@ COPY src ./src
 FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production
-# Persist the identity keypair + discovered-bridge list across restarts:
-# mount a volume at /data (see docker-compose.yml).
-ENV BRIDGE_IDENTITY_PATH=/data/identity.json
+# Persist the discovered-bridge list across restarts: mount a volume at /data
+# (see docker-compose.yml). The transport identity is NOT persisted and has no
+# path setting — it is minted fresh every start (INVARIANT I-ID).
 ENV BRIDGE_BOOK_PATH=/data/bridges.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/src ./src

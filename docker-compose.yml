@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     env_file: .env          # BRIDGE_PUBLIC_URL, BRIDGE_DIRECTORY, BRIDGE_LAT/LNG/REGION_LABEL, TURN_AUTH_SECRET, TURN_URLS, PORT, LOG_LEVEL
     volumes:
-      - bridge-data:/data   # identity keypair + discovered bridges (stable nodeId across restarts)
+      - bridge-data:/data   # discovered-bridge list only — the transport identity is never persisted (I-ID)
     networks: [edge]
     expose:
       - "8080"

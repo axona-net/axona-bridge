@@ -94,7 +94,6 @@ BRIDGE_LNG=-122.42
 BRIDGE_REGION_LABEL=testnet-sf
 
 # Its OWN persistent identity keypair — do NOT copy prod's.
-BRIDGE_IDENTITY_PATH=/opt/axona-bridge/identity.testnet.json
 
 # Bridge directory: the testnet runs an INDEPENDENT fleet and must NOT advertise
 # itself into the public directory the production apps read. Opt out explicitly.

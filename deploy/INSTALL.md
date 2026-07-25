@@ -226,7 +226,6 @@ BRIDGE_DIRECTORY=on
 BRIDGE_REGION_LABEL=eu-west
 BRIDGE_LAT=53.3
 BRIDGE_LNG=-6.2
-BRIDGE_IDENTITY_PATH=/var/lib/axona-bridge/identity.json
 TURN_AUTH_SECRET=<same secret as coturn's static-auth-secret>
 TURN_URLS=turn:bridge.example.org:3478       # add ,turns:...:5349 if you run TLS TURN
 ```
@@ -275,13 +274,18 @@ docker compose logs -f bridge          # Path B
   && systemctl restart axona-bridge`). Path B: `git pull && docker compose up -d
   --build`. The protocol gates on version, so keep reasonably current — a bridge
   too far behind the network's kernel floor is refused.
-- **Identity is precious-ish** — the keypair at `BRIDGE_IDENTITY_PATH` (or the
-  `bridge-data` volume) is your bridge's stable directory identity. Back it up to
-  encrypted offline storage; restrict it to the service user. If it leaks, an
-  attacker can run a bridge that *publishes under your directory entry* — note
-  that reputation is **first-party** (each client trusts only what it has
-  personally observed), so a thief inherits your entry, not other clients' trust;
-  still, rotate (regenerate) the identity if you suspect exposure.
+- **There is no identity to protect** — the bridge's transport keypair is
+  **ephemeral**: minted fresh on every start, held in memory, written nowhere.
+  There is nothing to back up, nothing to `chmod`, and nothing to rotate after a
+  suspected exposure, because the next restart rotates it for you.
+  This is deliberate (INVARIANT I-ID): a nodeId that survived restarts would be a
+  durable correlator for the host's IP and physical location, and would buy
+  nothing back. The bridge directory and reputation are keyed on the bridge
+  **URL**, not on its signer, so a rotating identity costs you no discoverability
+  — clients still find, rank, and fail over to the same bridge. Reputation stays
+  **first-party** (each client trusts only what it has personally observed).
+  If you find an `identity*.json` on a bridge host, it is residue from a
+  pre-2026-07 build: delete it.
 - **Don't expose the raw port or the full healthz** — the installer sets
   `HOST=127.0.0.1` (the bridge listens on loopback; only nginx reaches it) and a
   `HEALTHZ_TOKEN` (unauthenticated `/healthz` returns liveness + version only;
