@@ -13,9 +13,9 @@
 // advertise itself into the public directory the production apps consume.
 // =====================================================================
 
-import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry, createAuthorIdentity } from '@axona/protocol';
+import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry, createAuthorIdentity, regionNameForLatLng } from '@axona/protocol';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 
 // v0.3: the directory is a well-known OPEN topic. The pre-v0.3 scheme was a
 // public (publisher: null → 0x00 global) topic keyed solely on the topic NAME
@@ -25,7 +25,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // 'useast' region (the design doc's "deliberate, app-visible hot spot" pattern
 // for a topic the whole network must share) and reuse the kernel's topic-name
 // constant verbatim, so the directory keeps a single canonical placement.
-const DIRECTORY_TOPIC = { region: 'useast', name: BRIDGE_DIRECTORY_TOPIC };
+// The directory is an ORDINARY open topic — nothing hosts it specially, it roots
+// wherever its address lands, exactly like every other topic (INVARIANT: hosting
+// is decided by ADDRESS, never by who cares about the data).
+//
+// It is published into EVERY region that already has a bridge, not one global
+// region, so no single region's coverage is a dependency for global discovery.
+// The set is self-expanding and needs no seed list: we know our own region, and
+// we learn the others from the directory entries we have already seen (each
+// carries the publishing bridge's lat/lng). A new region joins the set the
+// moment a bridge lands there.
+const topicIn = (region) => ({ region, name: BRIDGE_DIRECTORY_TOPIC });
 
 /**
  * Start publishing this bridge to the directory.
@@ -40,7 +50,7 @@ const DIRECTORY_TOPIC = { region: 'useast', name: BRIDGE_DIRECTORY_TOPIC };
  * @param {(event:string, detail?:object)=>void} [o.log]
  * @returns {{ enabled:boolean, url:string|null, stop:()=>void }}
  */
-export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, book = null, log = () => {} }) {
+export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, book = null, authorStore = null, log = () => {} }) {
   const off = String(env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() === 'off';
   if (off) {
     log('disabled', { reason: 'BRIDGE_DIRECTORY=off' });
@@ -68,31 +78,60 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
   // dedups + ranks on the entry URL, not the signer (the bridge transport id is
   // ephemeral and the signer rotates every restart), so an ephemeral author is
   // fine here — it proves the entry wasn't tampered in transit, nothing more.
+  // The bridge's AUTHOR key is DURABLE (I-ID: durable WHO, ephemeral WHERE), so a
+  // client can verify "this is the same bridge that announced an hour ago"
+  // instead of trusting the URL alone. It is the ONLY key a bridge persists —
+  // its transport identity is still minted fresh every start and written nowhere.
   // Minted lazily so a disabled/misconfigured bridge does no keygen.
   let author = null;
+  async function ensureAuthor() {
+    if (author) return author;
+    author = authorStore
+      ? await createAuthorIdentity({ persistAs: 'bridge', store: authorStore })
+      : await createAuthorIdentity();
+    return author;
+  }
+
+  /**
+   * Every region that currently has a bridge: our own, plus the region of each
+   * bridge we already know about. Bounded by the number of populated regions,
+   * and it converges as the book fills.
+   */
+  function bridgeRegions() {
+    const set = new Set();
+    const own = regionNameForLatLng(region.lat, region.lng);
+    if (own) set.add(own);
+    for (const e of (book?.entries?.() ?? [])) {
+      const r = regionNameForLatLng(e?.lat, e?.lng);
+      if (r) set.add(r);
+    }
+    return [...set];
+  }
 
   async function publish(reason) {
-    try {
-      if (!author) author = await createAuthorIdentity();
-      // Open topic (write:'open') in a fixed region → globally discoverable; the
-      // bridge signs it, so its signerPubkey is its (rotating) directory id.
-      await peer.pub(DIRECTORY_TOPIC, makeEntry(), { signWith: author });
-      log('published', { url, reason });
-    } catch (err) {
-      log('publish-failed', { reason, err: err?.message });
+    const regions = bridgeRegions();
+    if (!regions.length) { log('publish-skipped', { reason, why: 'no known bridge region' }); return; }
+    const entry = makeEntry();
+    for (const r of regions) {
+      try {
+        // Ordinary open publish. Nothing is hosted; the topic roots wherever its
+        // address lands in that region, like any other topic.
+        await peer.pub(topicIn(r), entry, { signWith: author });
+        log('published', { url, reason, region: r });
+      } catch (err) {
+        log('publish-failed', { reason, region: r, err: err?.message });
+      }
     }
   }
 
-  // HOST the directory topic first, so the bridge is a durable root for it
-  // and stores+serves its own entry — even the launch publish (which lands
-  // before peers reconnect) is then retrievable by any later subscriber that
-  // routes to the bridge (it's in every peer's synaptome). Without this the
-  // launch publish would route into an empty mesh and be lost as the real
-  // region-closest roots fill in. Best-effort.
+  // REMOVED 2026-07-25 — the bridge used to host() this topic so it was a durable
+  // root for its own entry, because the launch publish lands before peers
+  // reconnect and would otherwise be lost into an empty mesh. The hourly beat
+  // below solves that properly: a lost publish is harmless when the next one is
+  // an hour away, so the topic no longer needs an exception to the address rule.
   let sub = null;
   (async () => {
-    try { await peer.host(DIRECTORY_TOPIC); log('hosting', {}); }
-    catch (err) { log('host-failed', { err: err?.message }); }
+    await ensureAuthor();
     await publish('launch');
     // Self-identify: declare this signer's author-class as 'bridge' (kernel
     // attestation on the signer's own owner-only profile topic). A client that
@@ -108,17 +147,25 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     // list like any node, so it can bootstrap from saved bridges next launch.
     if (book) {
       try {
-        sub = await peer.sub(DIRECTORY_TOPIC, (envp) => {
+        // Subscribe in every bridge region too, so we learn from all of them.
+        const subs = [];
+        for (const r of bridgeRegions()) subs.push(await peer.sub(topicIn(r), (envp) => {
           if (!envp || envp.deleted || !envp.signerPubkey) return;
           if (envp.message?.url === url) return;          // skip our own entry
           if (book.merge(envp.message, envp.signerPubkey)) {
             log('learned', { url: envp.message?.url, known: book.count });
           }
-        }, { since: 'all' });
+        }, { since: 'all' }));
+        sub = { stop() { for (const x of subs) { try { x?.stop?.(); } catch { /* dying */ } } } };
       } catch (err) { log('subscribe-failed', { err: err?.message }); }
     }
   })();
-  const timer = setInterval(() => publish('daily'), DAY_MS);
+  // HOURLY heartbeat. Two jobs at once: it repopulates an entry that missed the
+  // mesh, and it makes freshness the liveness signal — an entry older than an
+  // hour or two means that bridge has almost certainly gone, with no tombstone
+  // or departure protocol needed. Entries age out on the ordinary 24h ceiling,
+  // so nothing needs pruning.
+  const timer = setInterval(() => publish('heartbeat'), HOUR_MS);
   if (typeof timer.unref === 'function') timer.unref();   // don't keep the process alive
 
   return {

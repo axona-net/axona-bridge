@@ -47,6 +47,9 @@ export class BridgeBookStore {
   }
 
   /** Merge one received directory entry. Returns true if it changed the book. */
+  /** All known entries (URL-keyed, so bounded by distinct bridges, not beats). */
+  entries() { return Object.values(this._entries); }
+
   merge(entry, signerKey, now = Date.now()) {
     const v = validateBridgeEntry(entry);
     if (!v) return false;

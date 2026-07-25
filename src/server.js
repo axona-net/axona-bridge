@@ -41,7 +41,8 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import http   from 'http';
 
-import { readFileSync }    from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname }         from 'node:path';
 import { join as pathJoin } from 'node:path';
 import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { startDirectoryPublisher } from './bridge_directory.js';
@@ -562,6 +563,19 @@ log('axona-ready', {
 const DIRECTORY_ON = String(process.env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() !== 'off';
 const SELF_URL = process.env.BRIDGE_PUBLIC_URL || null;
 
+/** Minimal file-backed { get, set } for the DURABLE AUTHOR key (never the transport id). */
+function fileAuthorStore(path) {
+  const read = () => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
+  return {
+    get: (k) => read()[k] ?? null,
+    set: (k, v) => {
+      const o = read(); o[k] = v;
+      try { mkdirSync(dirname(path), { recursive: true }); } catch { /* exists */ }
+      writeFileSync(path, JSON.stringify(o, null, 2), { mode: 0o600 });
+    },
+  };
+}
+
 let bridgeBook = null;
 if (DIRECTORY_ON && SELF_URL) {
   const bookPath = process.env.BRIDGE_BOOK_PATH
@@ -574,11 +588,20 @@ if (DIRECTORY_ON && SELF_URL) {
   });
 }
 
+// The bridge's AUTHOR key is durable (I-ID: durable WHO, ephemeral WHERE) so a
+// client can tell the same bridge announced again, rather than trusting the URL
+// alone. It sits beside bridges.json in the same state dir, and it is the ONLY
+// key a bridge persists — the transport identity is still minted fresh per start.
+const authorPath = process.env.BRIDGE_AUTHOR_PATH
+  || (process.env.STATE_DIRECTORY ? pathJoin(process.env.STATE_DIRECTORY, 'author.json') : 'author.json');
+const authorStore = (DIRECTORY_ON && SELF_URL) ? fileAuthorStore(authorPath) : null;
+
 const directory = startDirectoryPublisher({
   peer:     bridgeNode.peer,
   identity: bridgeNode.identity,
   version:  VERSION,
   book:     bridgeBook,
+  authorStore,
   log:      (event, detail) => log(`directory:${event}`, detail),
 });
 
