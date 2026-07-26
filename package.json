@@ -19,7 +19,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@axona/protocol": "github:axona-net/axona-protocol#v4.39.0",
+    "@axona/protocol": "github:axona-net/axona-protocol#v4.43.0",
     "node-datachannel": "^0.32.3",
     "ws": "^8.18.0"
   },
