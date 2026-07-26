@@ -22,7 +22,7 @@ const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 // 'axona:bridge-directory'. v0.3 removes the global region: an open topic must
 // name a real, populated region, and every bridge + client must derive the SAME
 // (region, name) so they meet on one topic id. We pin the directory to the
-// 'useast' region (the design doc's "deliberate, app-visible hot spot" pattern
+// 'eagle' region (the design doc's "deliberate, app-visible hot spot" pattern
 // for a topic the whole network must share) and reuse the kernel's topic-name
 // constant verbatim, so the directory keeps a single canonical placement.
 // The directory is an ORDINARY open topic — nothing hosts it specially, it roots
