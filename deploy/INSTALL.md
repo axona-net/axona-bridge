@@ -274,6 +274,19 @@ docker compose logs -f bridge          # Path B
   && systemctl restart axona-bridge`). Path B: `git pull && docker compose up -d
   --build`. The protocol gates on version, so keep reasonably current — a bridge
   too far behind the network's kernel floor is refused.
+- **A non-production bridge must NEVER advertise itself** — set
+  `BRIDGE_DIRECTORY=off` on every testnet, staging, or scratch bridge, and treat
+  that as a rule rather than a preference.
+
+  The reason is that the damage is **permanent, not transient**. Every node that
+  hears a directory entry *persists* it — the bridge book is durable, precisely so
+  a cold client can bootstrap from what it already knows. So a single stray
+  advertisement from a test bridge is written into the book of every client that
+  heard it, and stays there as a bootstrap candidate indefinitely. Freshness ages
+  out the *entry*; it does not remove the *URL* from a book that is keyed by URL.
+
+  There is no clean undo. Do not turn the directory on to "just check something".
+
 - **There is no identity to protect** — the bridge's transport keypair is
   **ephemeral**: minted fresh on every start, held in memory, written nowhere.
   There is nothing to back up, nothing to `chmod`, and nothing to rotate after a
