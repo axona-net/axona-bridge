@@ -210,7 +210,22 @@ export class BridgeEngine {
       return 'consumed';
     });
 
-    const axon = new AxonaManager({ dht });
+    // BRIDGE FENCE (kernel v4.46.0). "A bridge is a bridge. It should not act as
+    // a root, but only transport and introducing new nodes to the mesh."
+    //   — David, 2026-07-26
+    //
+    // host() was removed from bridge_directory.js on 2026-07-25 for exactly this
+    // reason, but sub() self-roots too, so removing host() closed only one of the
+    // two doors. neverRoot closes the other: the kernel refuses every role at the
+    // HARD tier, which the admission floor may never override — a bridge must not
+    // become a root even when every other candidate in the neighbourhood is
+    // saturated or still in grace.
+    //
+    // Env escape hatch: BRIDGE_NEVER_ROOT=0 restores pre-4.46 behaviour. Needed
+    // for a bridge-only network (a fresh deployment with no relays yet), where
+    // refusing all roots would leave the bridge's own directory topic unrooted.
+    const neverRoot = process.env.BRIDGE_NEVER_ROOT !== '0';
+    const axon = new AxonaManager({ dht, neverRoot });
     this._axonByNode.set(node, axon);
     return axon;
   }
