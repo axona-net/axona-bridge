@@ -1,0 +1,26 @@
+name: links
+
+# Guards the cross-repo trap: a doc renamed in axona-docs breaks links here,
+# and nothing in this repo would otherwise notice. See
+# axona-docs/RELEASE-SURFACES.md §4.
+on:
+  push:
+    branches: [main, testnet]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays — catches renames landed in axona-docs alone
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: axona-net/axona-docs
+          ref: main
+          path: .axona-docs
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node .axona-docs/scripts/check-links.mjs . --docs-root .axona-docs
