@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.83.0**, embedding the kernel **4.29.x line** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub. The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.101.0**, embedding the kernel **4.48.x line** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub. The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -57,7 +57,7 @@ on its signer, so clients still discover, rank, and fail over to it across resta
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.83.0"}
+# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.101.0"}
 ```
 
 Smoke tests:
@@ -75,7 +75,7 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"2.83.0","kernelVersion":"4.29.0",…}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.101.0","kernelVersion":"4.48.0",…}
 ```
 
 ## Wire format
@@ -149,6 +149,9 @@ Env vars (see `.env.example`):
 | `LOG_LEVEL` | `info` | `debug` logs every ping/pong and signal relay (verbose) |
 | `REQUIRED_WIRE_MAJOR` | `4` | reject any `client-hello` not on this wire major |
 | `MIN_KERNEL_VERSION` | `3.15.0` | kernel-version floor; below → close 4426 |
+| `BRIDGE_DIRECTORY_MIN_UPTIME_MS` | `300000` | uptime required before this bridge advertises itself (the establishment gate) |
+| `BRIDGE_DIRECTORY_MIN_PEERS` | `3` | mesh peers required before it advertises |
+| `BRIDGE_NEVER_ROOT` | unset (=on) | a bridge never holds a topic role. `0` restores pre-4.46 behaviour — cold-start-only, see below |
 | `MIN_PEER_APP_VERSION` | `3.15.0` | floor for peer-app-versioned clients |
 | `HELLO_TIMEOUT_MS` | — | how long to wait for a peer's authenticated hello before dropping |
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
@@ -216,6 +219,31 @@ It regenerates `package-lock.json` (the lock must track the pin), verifies the l
 - **Run your own** — [`deploy/INSTALL.md`](deploy/INSTALL.md): the operator manual covering the one-command installer (`deploy/install.sh`), the Docker Compose stack (`docker-compose.yml`), and a manual walkthrough. This is the place to start.
 - **Production** (`bridge.axona.net` + `bridge-west.axona.net`): provisioned with `deploy/install.sh` / the procedure in `deploy/README.md` (systemd + nginx TLS + coturn). Federated; each advertises its TURN endpoint in the directory.
 - **SF testnet** (`testnet.axona.net`): see `deploy/testnet-setup.md`. Runs an isolated fleet with `BRIDGE_DIRECTORY=off`.
+
+## The establishment gate, and why a bridge never roots
+
+A bridge does **not** advertise itself into the directory on launch. It waits for
+`BRIDGE_DIRECTORY_MIN_UPTIME_MS` (5 min) **and** `BRIDGE_DIRECTORY_MIN_PEERS` (3),
+then publishes; the hourly beat keeps the entry fresh. While it waits you will
+see `directory:awaiting-establishment` in the log — that bridge is healthy and
+serving traffic, it is simply not yet listed for others to bootstrap through.
+
+It is the honest behaviour (a bridge shouldn't say "connect to me" before it can
+carry traffic), and it removes a real failure: at launch a bridge is TERMINAL for
+its own directory topic — nobody is closer — so under the bridge fence it would
+refuse to root the very topic it is publishing. Before kernel 4.48.0 that
+declined message re-routed to the only node available, itself, forever. It took
+a production bridge down for ~50 minutes on 2026-07-27.
+
+**A bridge is a bridge.** It never holds a topic role — root, backup, child or
+holder — at any load, in any topology. Three independent guards enforce it:
+routing skips a bridge as a next hop, `host()` was removed from the directory
+publisher, and `neverRoot` makes the kernel refuse every role at the HARD tier
+(the admission floor may not override it). `BRIDGE_NEVER_ROOT=0` exists only for
+a bridge-only cold start with no relays; in production the answer is more relays,
+not a bridge holding data.
+
+See the [Services Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Services-Guide-v4.48.0.md).
 
 ## License
 
