@@ -83,6 +83,7 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
   // instead of trusting the URL alone. It is the ONLY key a bridge persists —
   // its transport identity is still minted fresh every start and written nowhere.
   // Minted lazily so a disabled/misconfigured bridge does no keygen.
+  let stopped = false;
   let author = null;
   async function ensureAuthor() {
     if (author) return author;
@@ -108,7 +109,54 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     return [...set];
   }
 
+  // ── ESTABLISHMENT GATE (2026-07-27) ───────────────────────────────────
+  // A bridge must NOT advertise itself the instant it boots. At launch its
+  // synaptome is empty, so it is the only candidate for its own directory
+  // topic — it is TERMINAL for that address. Under the bridge fence it then
+  // refuses to root the topic it is trying to publish, and the declined PUB
+  // re-routes to the only node there is: itself. That is an unbounded
+  // synchronous loop; it took the east prod bridge down for ~50 min on
+  // 2026-07-27 (see ops/STATE.md INCIDENT).
+  //
+  // A bridge has no business announcing "connect to me" before it can carry
+  // traffic anyway, so the fix is also the honest behaviour: wait until the
+  // bridge is ESTABLISHED — some minutes of uptime AND a real synaptome —
+  // then publish, and let the existing hourly beat keep it fresh. A launch
+  // publish is worth nothing: nobody is listening to a mesh this bridge has
+  // not joined yet.
+  const MIN_UPTIME_MS = Number(env.BRIDGE_DIRECTORY_MIN_UPTIME_MS ?? 5 * 60_000);
+  const MIN_PEERS     = Number(env.BRIDGE_DIRECTORY_MIN_PEERS     ?? 3);
+  const POLL_MS       = Number(env.BRIDGE_DIRECTORY_POLL_MS       ?? 15_000);
+  const bootAt = Date.now();
+
+  /** Established = enough uptime AND a healthy synaptome. */
+  function establishment() {
+    const upMs  = Date.now() - bootAt;
+    const peers = (() => { try { return peer.peers()?.length ?? 0; } catch { return 0; } })();
+    return { ok: upMs >= MIN_UPTIME_MS && peers >= MIN_PEERS, upMs, peers };
+  }
+
+  /** Resolve once the bridge is established (or when stopped). */
+  function whenEstablished() {
+    return new Promise((resolve) => {
+      const tick = () => {
+        if (stopped) return resolve(false);
+        const e = establishment();
+        if (e.ok) { log('established', { upMs: e.upMs, peers: e.peers, minUptimeMs: MIN_UPTIME_MS, minPeers: MIN_PEERS }); return resolve(true); }
+        log('awaiting-establishment', { upMs: e.upMs, peers: e.peers, needUptimeMs: MIN_UPTIME_MS, needPeers: MIN_PEERS });
+        const t = setTimeout(tick, POLL_MS);
+        if (typeof t.unref === 'function') t.unref();
+      };
+      tick();
+    });
+  }
+
   async function publish(reason) {
+    // Never publish while unestablished, whatever the caller. The heartbeat and
+    // the post-uplink re-emit both come through here, and a mesh that has just
+    // emptied puts us right back to being terminal for our own topic.
+    const est = establishment();
+    if (!est.ok) { log('publish-deferred', { reason, upMs: est.upMs, peers: est.peers }); return; }
     const regions = bridgeRegions();
     if (!regions.length) { log('publish-skipped', { reason, why: 'no known bridge region' }); return; }
     const entry = makeEntry();
@@ -132,7 +180,9 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
   let sub = null;
   (async () => {
     await ensureAuthor();
-    await publish('launch');
+    // Was: an immediate publish('launch'). See the ESTABLISHMENT GATE above.
+    if (!(await whenEstablished())) return;   // stopped before we ever qualified
+    await publish('established');
     // Self-identify: declare this signer's author-class as 'bridge' (kernel
     // attestation on the signer's own owner-only profile topic). A client that
     // resolves the directory entry's signerPubkey via getAuthorClass then sees
@@ -175,6 +225,6 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     // entry lands on the SHARED mesh (the launch publish lands on the local
     // mesh before the uplink is up).
     republish: (reason = 'manual') => publish(reason),
-    stop() { clearInterval(timer); try { sub?.stop?.(); } catch { /* dying */ } },
+    stop() { stopped = true; clearInterval(timer); try { sub?.stop?.(); } catch { /* dying */ } },
   };
 }
