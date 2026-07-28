@@ -70,6 +70,29 @@ const HOST      = process.env.HOST ?? '0.0.0.0';
 // bridge env and pass `X-Healthz-Token: <value>` for the full readout. If unset,
 // the full body/diag are simply unavailable (closed by default).
 const HEALTHZ_TOKEN = process.env.HEALTHZ_TOKEN ?? null;
+
+/**
+ * Operator-token check, CONSTANT TIME (B2, 2026-07-28).
+ *
+ * Both call sites used `header === HEALTHZ_TOKEN`, which short-circuits on the
+ * first differing byte and therefore leaks the token prefix-by-prefix to anyone
+ * who can time the response. That was already true; B2 puts roles, capacity and
+ * refusal counts behind this token — placement-relevant information (E-1) — so
+ * the value of what it guards went up and the comparison had to catch up.
+ *
+ * Fails CLOSED: no token configured ⇒ nobody is authorised.
+ */
+function operatorAuthed(req) {
+  if (!HEALTHZ_TOKEN) return false;
+  const got = req.headers['x-healthz-token'];
+  if (typeof got !== 'string') return false;
+  const a = Buffer.from(got), b = Buffer.from(HEALTHZ_TOKEN);
+  // timingSafeEqual throws on length mismatch, which would itself be a length
+  // oracle — compare a fixed-size digest instead so every path costs the same.
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 
 // Version gate.  Browsers running an older peer can't be trusted to
@@ -657,12 +680,34 @@ const httpServer = http.createServer((req, res) => {
 
   if (req.url === '/healthz') {
     // G-8: minimal by default; full topology only with the operator token.
-    const authed = HEALTHZ_TOKEN && req.headers['x-healthz-token'] === HEALTHZ_TOKEN;
+    const authed = operatorAuthed(req);
+    // ── The public health SIGNAL (B2, 2026-07-28) ─────────────────────
+    // `status` used to be the string 'ok', unconditionally, forever. A bridge
+    // whose event loop was missing hello deadlines — or which had latched
+    // `saturated` off a single stall (F6/N1) — still said ok, so the two worst
+    // findings of the 4.48.0 review were invisible on our own infrastructure.
+    //
+    // The detail (roles, capacity, refusal counts) stays behind the operator
+    // token: it is placement-relevant targeting information and does not belong
+    // on an open endpoint. What is public is ONE derived bit. That bit is not
+    // free — it tells an observer this bridge is under pressure right now — but
+    // a health endpoint that cannot say "unwell" is worse than a coarse one that
+    // can, and a monitor has no other way to know.
+    //
+    // Deliberately still HTTP 200: a saturated bridge is still a perfectly good
+    // transport (a bridge never roots), and returning 5xx would invite a load
+    // balancer to pull a working bridge out of rotation. The body carries the
+    // verdict; the status line carries reachability.
+    const adm = bridgeNode.getAdmission?.() ?? null;
+    // null ⇒ UNKNOWN (manager not up / older kernel), never silently "healthy".
+    const degraded = adm ? adm.saturated === true : false;
+    const publicStatus = adm === null ? 'unknown' : (degraded ? 'degraded' : 'ok');
     let body;
     if (!authed) {
       // Unauthenticated liveness only — enough for clients/monitors to read the
-      // deployed version, nothing that fingerprints topology or names the seed.
-      body = JSON.stringify({ status: 'ok', version: VERSION, kernelVersion: KERNEL_VERSION });
+      // deployed version and see that this bridge is in trouble, nothing that
+      // fingerprints topology or names the seed.
+      body = JSON.stringify({ status: publicStatus, version: VERSION, kernelVersion: KERNEL_VERSION });
     } else {
       // Count admitted vs pending so operators can see how many
       // connections passed the version gate.
@@ -671,7 +716,7 @@ const httpServer = http.createServer((req, res) => {
         if (c.admitted) admittedCount++; else pendingCount++;
       }
       body = JSON.stringify({
-        status:         'ok',
+        status:         publicStatus,
         connections:    connections.size,
         admitted:       admittedCount,
         pending:        pendingCount,
@@ -702,6 +747,16 @@ const httpServer = http.createServer((req, res) => {
           known:   bridgeBook ? bridgeBook.count : 0,
         },
         uplink: bridgeNode.uplinkStatus(),
+        // Axonic admission + measured capacity (B2). OPERATOR-ONLY: role counts,
+        // saturation and refusal tallies say where and when placement pressure
+        // would succeed, which is precisely what E-1 asks us not to publish.
+        //
+        // Read `capacity.helloPressure` with `capacity.tickLagWindow` in hand:
+        // from kernel 4.49.0 `tickLagMaxMs` is a ROLLING max over that many
+        // ticks, and `tickLagPeakMs` is the all-time worst kept for diagnosis
+        // only. On a kernel below 4.49.0 the window fields are absent and
+        // tickLagMaxMs is an all-time ratchet — see F6/N1.
+        admission: adm,
         // Event-loop health — the smoking gun for admission drops under load.
         // A counter that silently reads zero is worse than no counter; these
         // are live gauges from the stall sampler.
@@ -733,7 +788,7 @@ const httpServer = http.createServer((req, res) => {
     // G-8: /diag exposes per-connection IPs, node ids, and UAs — operator-only.
     // Closed by default (404, so the endpoint isn't even advertised) unless the
     // operator token is set and presented.
-    if (!HEALTHZ_TOKEN || req.headers['x-healthz-token'] !== HEALTHZ_TOKEN) {
+    if (!operatorAuthed(req)) {
       res.writeHead(404, { 'Content-Type': 'application/json', ...cors });
       res.end('{"error":"not found"}');
       return;

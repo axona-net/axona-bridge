@@ -303,6 +303,30 @@ export class BridgeAxonaNode {
   getSynaptome() { return this._peer?.getSynaptome() ?? []; }
   getMetrics()   { return this._peer?.getMetrics()   ?? null; }
 
+  /**
+   * Axonic admission + capacity, straight from the kernel (B2, 2026-07-28).
+   *
+   * WHY THIS EXISTS. /healthz returned {status,version,kernelVersion} and
+   * nothing else, so a bridge could be permanently `saturated` — refusing every
+   * HANDOFF, its event loop missing hello deadlines — while reporting `ok`
+   * forever. Two of the severest findings in the 4.48.0 review (F1 tick-death,
+   * F6/N1 the helloPressure latch) were, on our own production infrastructure,
+   * completely unobservable from outside. A health surface that cannot report
+   * ill health is not a health surface.
+   *
+   * Reads inspectAdmission() off the manager rather than peer.health(): health()
+   * additionally builds the full role list, hosting snapshot and transport
+   * introspection, which is wasted work on a polling endpoint.
+   *
+   * Returns null when the manager isn't up yet (pre-start, or a build that
+   * predates the kernel's admission surface) — callers must treat null as
+   * "unknown", never as "healthy".
+   */
+  getAdmission() {
+    try { return this._engine?.axonFor?.(this._node)?.inspectAdmission?.() ?? null; }
+    catch { return null; }
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // Internal: NH-1 transport handlers + handshake completion
   // ─────────────────────────────────────────────────────────────────
