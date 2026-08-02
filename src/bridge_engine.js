@@ -157,6 +157,12 @@ export class BridgeEngine {
     const engine = this;
     const dht = {
       getSelfId:       () => peer.getNodeId(),
+      // Capability is DECLARED, never inferred (kernel v4.58.0 — construction
+      // throws without it, which is how the 4.59.2 re-pin surfaced this line).
+      // TRUE is honest here: routeMessage delegates to the kernel AxonaPeer's
+      // own path, which resolves {consumed:boolean, atNode, hops} — the same
+      // reporting the kernel's durability and forward-verdict machinery reads.
+      verdictsSupported: true,
       findKClosest:    (...args) => peer.findKClosest(...args),
       routeMessage:    (...args) => peer.routeMessage(...args),
       sendDirect:      async (peerId, type, payload) => {
