@@ -1184,6 +1184,19 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      case 'turn-refresh': {
+        // In-band TURN credential refresh (kernel 4.60.0). A long-lived meshed
+        // client whose 2h credential is about to lapse asks for a fresh one over
+        // its existing socket, so it never closes a healthy connection to
+        // re-welcome (which would reject in-flight bridge requests). Mint a new
+        // credential and return it in a `turn` frame. Admitted peers only.
+        if (!conn.admitted) break;
+        const turn = makeTurnCredential(id);
+        if (turn) sendTo(id, { type: 'turn', turn, serverT: Date.now() });
+        logDebug('turn-refresh', { connId: id, minted: !!turn });
+        break;
+      }
+
       case 'axona': {
         // Axona wire frame from the peer.  The transport unpacks
         // req/res/ntf, dispatches to handlers, and writes the
