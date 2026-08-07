@@ -6,7 +6,7 @@
   "type": "module",
   "main": "src/server.js",
   "scripts": {
-    "test": "node scripts/smoke-anchor-select.js && node scripts/smoke-graduation-select.js && node scripts/smoke-axona.js && node scripts/smoke-loop-stall.js && node test/fence_transport_identity.mjs && node test/smoke_directory_establishment.mjs && node test/smoke_healthz_exposure.mjs && node test/fence_config_parity.mjs && node test/check_kernel_pin.mjs",
+    "test": "node scripts/smoke-anchor-select.js && node scripts/smoke-graduation-select.js && node scripts/smoke-axona.js && node scripts/smoke-loop-stall.js && node test/fence_transport_identity.mjs && node test/smoke_directory_establishment.mjs && node test/smoke_healthz_exposure.mjs && node test/fence_config_parity.mjs && node test/fence_turn_refresh.mjs && node test/check_kernel_pin.mjs",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "smoke": "node scripts/smoke-client.js",
