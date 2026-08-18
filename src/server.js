@@ -136,6 +136,16 @@ const MIN_PEER_VERSION   = process.env.MIN_PEER_VERSION ?? '1.1.0';
 const STRICT_MIN_KERNEL = process.env.STRICT_MIN_KERNEL ?? null;
 const HELLO_TIMEOUT_MS   = Number.parseInt(process.env.HELLO_TIMEOUT_MS ?? '5000', 10);
 const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
+// Distinct from 4426. A hello-timeout means the client sent NOTHING within the
+// window — almost always a suspended / slow-waking tab, not an out-of-date
+// build. Closing it with 4426 made the kernel print "UPGRADE REQUIRED — update
+// @axona/protocol", a false diagnosis a sleep/wake triggers routinely. This code
+// carries no version verdict: the kernel's web-transport close handler doesn't
+// recognize it and so treats it as a plain disconnect and reconnects with
+// backoff — exactly right for a client that just needs to re-dial. A genuine
+// version/wire/kernel mismatch still closes 4426 (terminal, see the admission
+// gate), so the two meanings no longer share a code.
+const CLOSE_HELLO_TIMEOUT    = 4408;   // mirrors HTTP 408 "Request Timeout"
 
 // ── Flag-day floors for the v2.9.0 envelope format (findings C-2/E-4) ──────
 // The signed-envelope format changed (per-publisher `seq` + freshness window +
@@ -948,9 +958,12 @@ wss.on('connection', (ws, req) => {
     }
     logErr('client-hello-timeout', { connId: id, ms: HELLO_TIMEOUT_MS });
     try {
-      ws.close(CLOSE_UPGRADE_REQUIRED,
-        `client-hello not received within ${HELLO_TIMEOUT_MS}ms; ` +
-        `min peer v${MIN_PEER_VERSION} required`);
+      // NON-terminal: no client-hello arrived, which is a stalled/suspended
+      // socket far more often than an old build. Close 4408 (not 4426) so the
+      // client reconnects instead of being falsely told to upgrade. No version
+      // clause here — a timeout is not a version verdict.
+      ws.close(CLOSE_HELLO_TIMEOUT,
+        `client-hello not received within ${HELLO_TIMEOUT_MS}ms`);
     } catch {}
   };
   conn.helloTimer = setTimeout(onHelloTimeout, HELLO_TIMEOUT_MS);
