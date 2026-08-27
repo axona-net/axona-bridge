@@ -47,6 +47,7 @@ function clz64(x) {
 }
 
 import { CompositeTransport } from '@axona/protocol/transport/web/composite.js';
+import { readDispatchCapability } from '@axona/protocol/registry/index.js';
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
@@ -480,7 +481,12 @@ export class BridgeAxonaNode {
     // server WS or the outbound uplink reach the router.
     const t = this._node.transport;
     const peer = () => this._peer;
-    t.onRequest('route_msg', async (_fromId, body) => {
+    // REF-1.1 E3 (kernel 4.63+): the composite's public onRequest is sealed.
+    // Install through its deposited capability — the same channel the
+    // kernel's registerFrame uses — which records the handler and fans it
+    // onto every current AND later sub-transport (the uplink added after
+    // startup inherits it, same as the sealed fan-out always did).
+    readDispatchCapability(t).request('route_msg', async (_fromId, body) => {
       const { type, payload, targetId, originId } = body ?? {};
       if (!peer()) return { consumed: false, atNode: null, hops: 0, exhausted: true };
       return peer().routeMessage(targetId, type, payload, { fromId: originId });

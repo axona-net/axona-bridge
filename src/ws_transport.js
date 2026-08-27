@@ -22,6 +22,7 @@
 // =====================================================================
 
 import { Transport } from '@axona/protocol';
+import { depositDispatchCapability } from '@axona/protocol/registry/index.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
@@ -53,6 +54,18 @@ export class WebSocketTransport extends Transport {
 
     this._reqHandlers = new Map();
     this._ntfHandlers = new Map();
+    // REF-1.1 E3 (kernel 4.63+): every sub-transport handed to the kernel's
+    // CompositeTransport must deposit its dispatch capability at
+    // construction — the sealed fan-out reads ONLY the capability channel
+    // and throws on an undeposited sub (no literal-method fallback). The
+    // closures write the same handler maps the public onRequest /
+    // onNotification methods write, so bridge-internal callers and the
+    // kernel's registerFrame land in one place. First bridge build against
+    // the sealed kernel; the pre-4.63 bridge never needed this.
+    depositDispatchCapability(this, {
+      request:      (type, handler) => { this._reqHandlers.set(type, handler); },
+      notification: (type, handler) => { this._ntfHandlers.set(type, handler); },
+    });
     this._pending     = new Map();
     this._nextId      = 1;
     this._peerDiedHandlers = [];

@@ -16,6 +16,7 @@
 // =====================================================================
 
 import { AxonaManager } from '@axona/protocol/pubsub/AxonaManager.js';
+import { depositDispatchCapability } from '@axona/protocol/registry/index.js';
 
 export class BridgeEngine {
   constructor(config = {}) {
@@ -190,11 +191,24 @@ export class BridgeEngine {
         }).catch(err => console.error('BridgeEngine routed sendDirect failed:', err));
         return true;
       },
-      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      // REF-1.1 E3b.2c (kernel 4.63+): the public peer.onRoutedMessage is
+      // sealed. Routed handlers install by writing the peer's handler table
+      // directly — the deposited capability writes the same map, and
+      // _deliverRouted reads it (same pattern dht-sim's engine shims use).
+      onRoutedMessage: (type, h) => peer._routedHandlers.set(type, h),
       onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
     };
+    // REF-1.1 E3 (kernel 4.63+): AxonaManager registers its 19 routed pub/sub
+    // frames on this shim through registerFrame, and the door requires the
+    // RECEIVER to carry a deposited dispatch capability — capability presence
+    // is mandatory, no literal-name fallback. The routed closure lands in the
+    // same delegate the shim already exposes (same pattern as dht-sim's
+    // AxonaEngine node shim).
+    depositDispatchCapability(dht, {
+      routed: (type, h) => dht.onRoutedMessage(type, h),
+    });
 
-    peer.onRoutedMessage('__tunneled_direct__', async (payload, meta) => {
+    peer._routedHandlers.set('__tunneled_direct__', async (payload, meta) => {
       const targetBig = typeof meta.targetId === 'bigint'
         ? meta.targetId
         : (typeof meta.targetId === 'string'
