@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.101.0**, embedding the kernel **4.48.x line** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub. The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.115.0**, embedding the kernel **4.73.x line** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and a root for region-keyed pub/sub. The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -75,7 +75,7 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"2.101.0","kernelVersion":"4.48.0",…}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.115.0","kernelVersion":"4.73.1",…}
 ```
 
 ## Wire format
