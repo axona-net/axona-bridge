@@ -361,6 +361,21 @@ export class BridgeAxonaNode {
         this._closeConn(connId, `upgrade required: this network speaks axona/4 (${res.reason})`);
         return;
       }
+      // CLOSED-FLEET ALLOWLIST (Part A, level-isolation spec v2; David-approved testnet
+      // build). Admit at the bridge ingress only a cryptographically-proven identity on
+      // the run's allowlist — Aster's "enforced at every ingress" rule. Absent
+      // FLEET_ALLOWLIST = dormant (allow-all) → the prod bridge is byte-identical.
+      try {
+        const _al = process.env && process.env.FLEET_ALLOWLIST;
+        if (_al) {
+          const _set = new Set(_al.split(',').map((s) => s.trim()).filter(Boolean));
+          if (_set.size && !_set.has(res.nodeId)) {
+            this._log('auth-peer-not-allowlisted', { connId, label, peer: res.nodeId });
+            this._closeConn(connId, 'not on the closed-fleet allowlist');
+            return;
+          }
+        }
+      } catch { /* no process.env */ }
       const peerNodeId = BigInt('0x' + res.nodeId);
       this._completeHandshake(connId, peerNodeId);
       // On an inbound hello, reply with our own authenticated hello-ack.
