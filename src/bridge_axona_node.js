@@ -504,7 +504,15 @@ export class BridgeAxonaNode {
     readDispatchCapability(t).request('route_msg', async (_fromId, body) => {
       const { type, payload, targetId, originId } = body ?? {};
       if (!peer()) return { consumed: false, atNode: null, hops: 0, exhausted: true };
-      return peer().routeMessage(targetId, type, payload, { fromId: originId });
+      // Wire targetId is hex (v1.5 contract); peer.routeMessage requires a BIGINT. The
+      // kernel's own route_msg handler converts via asId — this bridge forwarder omitted it,
+      // so EVERY routed message the bridge tried to forward threw "targetId must be bigint"
+      // and was dropped. In a small fleet the bridge carries a real share of routed hops, so
+      // this was a systematic loss (David 2026-09-02). Convert exactly as bridge_engine does.
+      const targetBig = typeof targetId === 'bigint'
+        ? targetId
+        : (typeof targetId === 'string' ? BigInt('0x' + targetId.replace(/^0x/, '')) : targetId);
+      return peer().routeMessage(targetBig, type, payload, { fromId: originId });
     });
   }
 
