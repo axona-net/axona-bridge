@@ -246,11 +246,35 @@ const TURN_URLS        = (process.env.TURN_URLS ?? 'turn:turn.axona.net:3478,tur
 function makeTurnCredential(_peerId) {
   if (!TURN_AUTH_SECRET) return null;
   const expiry   = Math.floor(Date.now() / 1000) + TURN_TTL_SECONDS;
-  // Ephemeral per-session token, not the peer's node id (G-5): no stable
-  // handle for a TURN operator to correlate sessions by. coturn validates
-  // the HMAC over the whole username regardless of the suffix.
-  const token    = crypto.randomBytes(9).toString('base64url');
-  const username = `${expiry}:${token}`;
+  // USERNAME IS THE BARE EXPIRY. No `:token` suffix.
+  //
+  // The previous form was `${expiry}:${base64url}` on the belief — stated in
+  // the comment that used to live here — that "coturn validates the HMAC over
+  // the whole username regardless of the suffix". That is what the REST scheme
+  // specifies and it is NOT what this coturn does. Measured against the live
+  // server, three trials each way with credentials differing only in the
+  // suffix and signed with the same secret:
+  //
+  //     username "1788902140"        → typ relay 64.227.2.28:58217   3/3 OK
+  //     username "1788902140:abc"    → "Cannot find credentials"     3/3 FAIL
+  //
+  // coturn logged the rejected user as <1788902140> — the suffix stripped —
+  // so it authenticated against a different string than the one we signed.
+  // The suffix was alphanumeric in that test, so this is the separator, not
+  // base64url characters.
+  //
+  // CONSEQUENCE, and it is why this went unseen: TURN was dead for EVERY
+  // client that needed a relay. Chrome on a LAN never needs one — it offers
+  // real host candidates — so it worked throughout. Safari never gets a
+  // dialable candidate (WebKit emits only an mDNS .local host candidate for
+  // media-less connections), so relay was its only path and there was none.
+  // A whole browser engine, and every browser on iOS, could not join the mesh.
+  //
+  // G-5 IS PRESERVED. The suffix existed so a TURN operator had no stable
+  // handle to correlate sessions by. A bare expiry is strictly better at that:
+  // it carries no per-session entropy at all, and every peer minting in the
+  // same second is indistinguishable. Nothing about the node is disclosed.
+  const username = `${expiry}`;
   const credential = crypto
     .createHmac('sha1', TURN_AUTH_SECRET)
     .update(username)
