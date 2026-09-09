@@ -40,6 +40,7 @@
 import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import http   from 'http';
+import net    from 'node:net';
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname }         from 'node:path';
@@ -240,8 +241,64 @@ const startTs   = Date.now();
 // that expires in TURN_TTL_SECONDS.
 const TURN_AUTH_SECRET = process.env.TURN_AUTH_SECRET ?? null;
 const TURN_TTL_SECONDS = 60 * 60 * 2;   // 2h — longer than any realistic session
-const TURN_URLS        = (process.env.TURN_URLS ?? 'turn:turn.axona.net:3478,turns:turn.axona.net:5349')
+// ADVERTISE ONLY WHAT IS SERVED. The default carried `turns:turn.axona.net:5349`
+// and nothing has ever listened there on the Docker deployment — docker-compose.yml
+// says so in its own comment ("coturn here serves turn:// (3478) only; turns://
+// needs the cert shared with coturn"). Every client was handed a dead ICE server
+// and spent gathering time on it, and #344 ("offer TCP/TLS TURN fallback") read
+// as partly done when the TLS half was never up. Measured 2026-09-08 against the
+// live bridge with raw STUN/TURN Allocate: udp 3478 GRANTED, tcp 3478 GRANTED,
+// tls 5349 ECONNREFUSED.
+//
+// A deployment that DOES terminate TLS (deploy/install.sh with ENABLE_TURNS=1)
+// sets TURN_URLS itself; the override is unchanged. What changed is that the
+// fallback no longer promises a port this compose file does not open.
+const TURN_URLS        = (process.env.TURN_URLS ?? 'turn:turn.axona.net:3478')
   .split(',').map(s => s.trim()).filter(Boolean);
+
+/**
+ * Probe every advertised TURN URL at startup and say which ones answer.
+ *
+ * The bug above was silent for as long as it existed: the bridge asserted a
+ * relay endpoint, the client believed it, and nothing on either side ever
+ * checked. This does not DROP an unreachable URL — a transient refusal during
+ * boot would then strip a working relay for the process's whole life, which is
+ * worse than the disease. It makes the mismatch loud, once, at the moment
+ * someone could act on it.
+ *
+ * TCP-connect only: it proves something is listening, which is exactly the
+ * property that was false. It is not an allocation test and does not speak to
+ * credentials — coturn answers a STUN challenge before any of that.
+ */
+function probeTurnUrls(urls) {
+  const seen = new Set();
+  for (const url of urls) {
+    // turn:host:port[?transport=tcp] / turns:host:port
+    const m = /^turns?:([^:?]+):(\d+)/.exec(url);
+    if (!m) { logErr('turn-url-unparseable', { url }); continue; }
+    const [, host, port] = m;
+    const key = `${host}:${port}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const socket = new net.Socket();
+    const done = (ok, reason) => {
+      socket.destroy();
+      if (ok) log('turn-url-reachable', { url, host, port: Number(port) });
+      // LOUD: an advertised relay nobody is listening on is a client-visible
+      // defect, not a warning about our own housekeeping.
+      else logErr('turn-url-UNREACHABLE', {
+        url, host, port: Number(port), reason,
+        impact: 'clients are being handed an ICE server that will not answer',
+      });
+    };
+    socket.setTimeout(5000);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false, 'timeout'));
+    socket.once('error',   (e) => done(false, e.code || e.message));
+    socket.connect(Number(port), host);
+  }
+}
 
 function makeTurnCredential(_peerId) {
   if (!TURN_AUTH_SECRET) return null;
@@ -1366,6 +1423,9 @@ httpServer.listen(PORT, HOST, () => {
     turnUrls:              TURN_AUTH_SECRET ? TURN_URLS : [],
     turnTtlSeconds:        TURN_AUTH_SECRET ? TURN_TTL_SECONDS : 0,
   });
+  // Say which advertised relays actually answer. Advertising one that does
+  // not is a client-visible defect and used to be invisible from here.
+  if (TURN_AUTH_SECRET) probeTurnUrls(TURN_URLS);
 });
 
 // ── Graceful shutdown ────────────────────────────────────────────────
