@@ -51,6 +51,7 @@ import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
 import { selectAnchors }   from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
+import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 
 // Derive from package.json so /healthz never drifts from the deployed build
@@ -645,6 +646,24 @@ log('axona-ready', {
   region: bridgeNode.identity.region.label,
 });
 
+// ── O1: kernel events into this bridge's log (BRIDGE_KERNEL_LOG=on) ──
+// Registration and reads only — see kernel_log.js for why that is checkable
+// rather than asserted. Installed immediately after start() so the manager
+// exists and no decision made after this line goes unlogged. With the flag
+// unset nothing is registered and the process is byte-identical to before.
+const kernelLog = installKernelLog({
+  peer:         bridgeNode.peer,
+  axonaManager: bridgeNode.axon,
+  sink: (level, event, fields) => (level === 'error' ? logErr : log)(event, fields),
+});
+log('kernel-log', {
+  armed:     kernelLog.installed,
+  reason:    kernelLog.reason,
+  intakes:   kernelLog.intakes,
+  latTrace:  latTraceOn(),          // the kernel's own gate, read at ITS construction
+  requested: kernelLogOn(),
+});
+
 // ── Bridge directory + federation ────────────────────────────────────
 // Advertise this bridge on the public directory topic so clients discover it
 // and fail over to it, AND bootstrap this bridge INTO the live mesh as a node
@@ -923,7 +942,7 @@ const httpServer = http.createServer((req, res) => {
     // built pub/sub engine), NOT bridgeNode._axon — that legacy field
     // was never set, so this readout silently reported zero roles
     // regardless of actual state.  Reach through the AxonaPeer.
-    const axon = bridgeNode._peer?._axonaManager ?? bridgeNode._axon;
+    const axon = bridgeNode.axon;
     if (axon?.axonRoles) {
       for (const [topicId, role] of axon.axonRoles) {
         axonRoles.push({
@@ -950,6 +969,21 @@ const httpServer = http.createServer((req, res) => {
         region:        bridgeNode.identity.region.label,
         synaptomeSize: synaptome.length,
       },
+      // O1, read-only. `admission` is the kernel's own counter block
+      // (inspectAdmission): roles held against the ceiling, seated, saturated,
+      // neverRoot, remaining grace, and the per-reason refusal tallies. On a
+      // bridge neverRoot is true, so this is where "how often did something ask
+      // this bridge to root, and what did it answer" becomes a number instead of
+      // an inference from the previous hop. `kernelLog` reports whether the log
+      // intake is armed and how many rows it has dropped to its own rate cap —
+      // a gap in the log must be visible as a count, never as silence.
+      // safeContext, not the raw block: /diag serializes with a plain
+      // JSON.stringify, and one BigInt anywhere under this key would turn a
+      // diagnostic endpoint into a 500 during the run that needed it.
+      admission: (() => {
+        try { const a = axon?.inspectAdmission?.(); return a ? safeContext(a) : null; } catch { return null; }
+      })(),
+      kernelLog: { ...kernelLog.stats(), armed: kernelLog.installed, intakes: kernelLog.intakes, latTrace: latTraceOn() },
       // The connections list shows BOTH admitted & pending so we can
       // see peers stuck in the client-hello race or post-admit but
       // pre-handshake.

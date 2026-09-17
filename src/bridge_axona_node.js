@@ -103,6 +103,10 @@ export class BridgeAxonaNode {
   get nodeId()    { return this._identity?.id ?? null; }
   get peer()      { return this._peer; }
   get transport() { return this._transport; }
+  // The bridge's pub/sub manager, built eagerly in start(). Exposed read-only so
+  // observability (kernel_log.js) and /diag stop reaching through two private
+  // fields and guessing which one is set — the guess was already wrong once.
+  get axon()      { return this._axon ?? this._peer?._axonaManager ?? null; }
 
   /**
    * Bring the embedded peer up.  Synchronous-friendly: callers

@@ -154,6 +154,8 @@ Env vars (see `.env.example`):
 | `BRIDGE_NEVER_ROOT` | unset (=on) | a bridge never holds a topic role. `0` restores pre-4.46 behaviour — cold-start-only, see below |
 | `BRIDGE_UPSTREAMS` | — | comma-separated upstream bridges to uplink to, tried first (then the bridge book, then the built-in prod bridges) |
 | `BRIDGE_UPSTREAMS_ONLY` | `off` | `on` = fail-closed federation: dial only `BRIDGE_UPSTREAMS`, never the book or the prod bridges; if none answers, exit non-zero before advertising or listening. For a test bridge that must never join production |
+| `BRIDGE_KERNEL_LOG` | `off` | `on` = forward the embedded kernel peer's info/warn/error events into this bridge's structured log as `kernel:<event>` rows, and add `admission` + `kernelLog` to `/diag`. Registration and reads only; routing is untouched. Pair with `LAT_TRACE=1` for per-hop ledger rows. Rows are capped per second and the overflow is reported as `kernel-log-throttled` |
+| `LAT_TRACE` | — | `1` arms the kernel's own per-stage delivery trace. Read by the kernel at construction, so it must be set before start. Only reaches a bridge's log when `BRIDGE_KERNEL_LOG=on` |
 | `MIN_PEER_APP_VERSION` | `3.15.0` | floor for peer-app-versioned clients |
 | `HELLO_TIMEOUT_MS` | — | how long to wait for a peer's authenticated hello before dropping |
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |

@@ -95,6 +95,13 @@ export const SETTINGS = [
   { key: 'upstreamsOnly',        env: 'BRIDGE_UPSTREAMS_ONLY',
     read: v => String(v ?? 'off').toLowerCase() === 'on' },
 
+  // ── observability (O1) ──
+  // Forward the embedded kernel peer's info/warn/error events into this
+  // bridge's structured log (kernel_log.js). Off by default: with it unset a
+  // bridge registers nothing and behaves exactly as it did before O1.
+  { key: 'kernelLog',            env: 'BRIDGE_KERNEL_LOG',
+    read: v => String(v ?? 'off').toLowerCase() === 'on' },
+
   // ── test hook ──
   { key: 'testStall',            env: 'BRIDGE_TEST_STALL',                read: v => v === 'on' },
 ];
