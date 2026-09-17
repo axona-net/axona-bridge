@@ -57,8 +57,17 @@ export const SETTINGS = [
 
   // ── TURN credentials handed to clients ──
   { key: 'turnAuthSecret',       env: 'TURN_AUTH_SECRET',                 read: v => v ?? null },
+  // ADVERTISE ONLY WHAT IS SERVED. This default carried `turns:turn.axona.net:5349`
+  // until server.js dropped it on 2026-09-08: nothing listens there on the Docker
+  // deployment (measured against the live bridge — udp 3478 GRANTED, tcp 3478
+  // GRANTED, tls 5349 ECONNREFUSED), so every client spent ICE gathering time on a
+  // dead server. server.js:256 changed; this copy did not, and fence_config_parity
+  // has failed on the difference since. A deployment that does terminate TLS sets
+  // TURN_URLS itself. Both live bridges set it explicitly, so no bridge changes
+  // behaviour here — only a bridge with no TURN_URLS at all, which now advertises
+  // the same one URL from either file.
   { key: 'turnUrls',             env: 'TURN_URLS',
-    read: v => (v ?? 'turn:turn.axona.net:3478,turns:turn.axona.net:5349')
+    read: v => (v ?? 'turn:turn.axona.net:3478')
       .split(',').map(s => s.trim()).filter(Boolean) },
 
   // ── bootstrap nursery + anchors ──
@@ -81,6 +90,10 @@ export const SETTINGS = [
   { key: 'directoryOn',          env: 'BRIDGE_DIRECTORY',
     read: v => String(v ?? 'on').toLowerCase() !== 'off' },
   { key: 'publicUrl',            env: 'BRIDGE_PUBLIC_URL',                read: v => v || null },
+  // Fail-closed federation: dial only BRIDGE_UPSTREAMS; exit if none answers
+  // (uplink_policy.js, and the isolation gate in server.js).
+  { key: 'upstreamsOnly',        env: 'BRIDGE_UPSTREAMS_ONLY',
+    read: v => String(v ?? 'off').toLowerCase() === 'on' },
 
   // ── test hook ──
   { key: 'testStall',            env: 'BRIDGE_TEST_STALL',                read: v => v === 'on' },

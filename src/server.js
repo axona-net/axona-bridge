@@ -652,6 +652,10 @@ log('axona-ready', {
 // The testnet bridge opts out via BRIDGE_DIRECTORY=off (independent fleet).
 const DIRECTORY_ON = String(process.env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() !== 'off';
 const SELF_URL = process.env.BRIDGE_PUBLIC_URL || null;
+// Fail-closed federation (see uplink_policy.js). ON: dial only BRIDGE_UPSTREAMS,
+// never the bridge book or the built-in prod bridges, and exit before advertising
+// or listening if none answers.
+const UPSTREAMS_ONLY = String(process.env.BRIDGE_UPSTREAMS_ONLY ?? 'off').toLowerCase() === 'on';
 
 /** Minimal file-backed { get, set } for the DURABLE AUTHOR key (never the transport id). */
 function fileAuthorStore(path) {
@@ -686,6 +690,32 @@ const authorPath = process.env.BRIDGE_AUTHOR_PATH
   || (process.env.STATE_DIRECTORY ? pathJoin(process.env.STATE_DIRECTORY, 'author.json') : 'author.json');
 const authorStore = (DIRECTORY_ON && SELF_URL) ? fileAuthorStore(authorPath) : null;
 
+// ── ISOLATION GATE (BRIDGE_UPSTREAMS_ONLY=on) ────────────────────────
+// Runs BEFORE the directory publisher starts and BEFORE httpServer.listen (far
+// below), and it is awaited, not backgrounded: a bridge in this mode either has
+// its uplink to an explicitly named upstream, or the process ends here with a
+// non-zero code, having advertised nothing and accepted nothing. It does not
+// depend on BRIDGE_DIRECTORY or BRIDGE_PUBLIC_URL, so an isolated bridge can run
+// with the directory off. The bridge book is not passed: in this mode it is never
+// a source of candidates (uplink_policy.js), and passing null makes that plain.
+// Default mode (flag unset) is untouched: the background block below still runs.
+if (UPSTREAMS_ONLY) {
+  let upstream = null;
+  try {
+    upstream = await bridgeNode.startUplink({ book: null, selfUrl: SELF_URL });
+  } catch (err) {
+    logErr('uplink-isolation-gate-error', { err: err?.message });
+  }
+  if (!upstream) {
+    logErr('uplink-isolation-gate-failed', {
+      reason: 'BRIDGE_UPSTREAMS_ONLY=on and no BRIDGE_UPSTREAMS seed reachable — exiting before directory and listen',
+      seeds: String(process.env.BRIDGE_UPSTREAMS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    });
+    process.exit(1);
+  }
+  log('uplink-up', { upstream, mode: 'upstreams-only' });
+}
+
 const directory = startDirectoryPublisher({
   peer:     bridgeNode.peer,
   identity: bridgeNode.identity,
@@ -697,7 +727,8 @@ const directory = startDirectoryPublisher({
 
 // Bootstrap into the mesh as a node (non-fatal, background). Once the uplink
 // integrates, re-publish so this bridge's entry lands on the SHARED mesh.
-if (DIRECTORY_ON && SELF_URL) {
+// Skipped in upstreams-only mode: the isolation gate above already owns the uplink.
+if (!UPSTREAMS_ONLY && DIRECTORY_ON && SELF_URL) {
   bridgeNode.startUplink({ book: bridgeBook, selfUrl: SELF_URL })
     .then((upstream) => {
       if (upstream) { log('uplink-up', { upstream }); directory.republish?.('post-uplink'); }

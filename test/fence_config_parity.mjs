@@ -32,8 +32,16 @@ const bare = resolveConfig({}, {});
 ok('1. resolves with no environment at all', bare && typeof bare === 'object');
 ok('   port defaults to 8080', bare.port === 8080, `got ${bare.port}`);
 ok('   host defaults to 0.0.0.0', bare.host === '0.0.0.0', `got ${bare.host}`);
-ok('   turnUrls parses to a list', Array.isArray(bare.turnUrls) && bare.turnUrls.length === 2,
+// The count used to be 2. server.js dropped `turns:turn.axona.net:5349` on
+// 2026-09-08 — nothing listens there on the Docker deployment (tls 5349
+// ECONNREFUSED, measured), so advertising it cost every client ICE gathering time
+// on a dead server. Pinned as "a list that advertises no turns: URL by default"
+// rather than a count, because the count is what made this assertion outlive the
+// fact it was protecting. A deployment that terminates TLS sets TURN_URLS itself.
+ok('   turnUrls parses to a list', Array.isArray(bare.turnUrls) && bare.turnUrls.length >= 1,
   JSON.stringify(bare.turnUrls));
+ok('   the default advertises no turns: URL (nothing serves 5349)',
+  !bare.turnUrls.some((u) => u.startsWith('turns:')), JSON.stringify(bare.turnUrls));
 ok('   nursery is ON by default', bare.nurseryOn === true);
 ok('   directory is ON by default', bare.directoryOn === true);
 

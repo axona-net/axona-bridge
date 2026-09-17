@@ -8,6 +8,10 @@
 // bridge — discovers it). This is the same stack a browser/relay runs:
 // webTransport() over a node-datachannel + ws polyfill.
 //
+// With BRIDGE_UPSTREAMS_ONLY=on the candidates are the env seeds ONLY (no book,
+// no built-in prod bridges); see uplink_policy.js and the isolation gate in
+// server.js.
+//
 // The uplink is ONE outbound connection at a time, picked as the first
 // reachable ranked candidate. webTransport reconnects to that same upstream
 // if it drops; cross-upstream failover happens on the next process launch
@@ -17,9 +21,11 @@
 import { webTransport } from '@axona/protocol/transport/web/index.js';
 import { sign as edSign } from '@axona/protocol';
 import { WebSocketImpl } from './polyfill.js';
+import { planUplink, resolveSeeds, DEFAULT_UPSTREAMS } from './uplink_policy.js';
 
-// Built-in fallback seeds: the known prod bridges. Self is filtered out.
-const DEFAULT_UPSTREAMS = ['wss://bridge.axona.net', 'wss://bridge-west.axona.net'];
+// Seed selection (and BRIDGE_UPSTREAMS_ONLY) lives in uplink_policy.js so it can
+// be tested without loading the transport. Re-exported here for existing callers.
+export { resolveSeeds, DEFAULT_UPSTREAMS };
 
 /** Can we open a WebSocket to `url`? (Cheap reachability probe.) */
 function probe(url, timeoutMs = 4000) {
@@ -32,16 +38,6 @@ function probe(url, timeoutMs = 4000) {
     ws.onerror = () => { clearTimeout(t); fin(false); };
     ws.onclose = () => { clearTimeout(t); fin(false); };
   });
-}
-
-/** Ranked upstream candidates: env ∪ persisted book ∪ defaults, minus self. */
-export function resolveSeeds({ env = process.env, book = null, selfUrl = null }) {
-  const fromEnv = String(env.BRIDGE_UPSTREAMS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const roots = [...fromEnv, ...DEFAULT_UPSTREAMS];
-  const ranked = book ? book.candidates(roots) : roots;
-  const seen = new Set();
-  return ranked.filter((u) => u && u !== selfUrl && !seen.has(u) && seen.add(u));
 }
 
 /**
@@ -57,15 +53,8 @@ export function resolveSeeds({ env = process.env, book = null, selfUrl = null })
  * @param {(event:string, detail?:object)=>void} [o.log]
  */
 export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {} }) {
-  const seeds = resolveSeeds({ env, book, selfUrl });
-  if (!seeds.length) { log('no-seeds'); return null; }
-
-  let upstream = null;
-  for (const url of seeds) {
-    if (await probe(url)) { upstream = url; break; }
-    log('seed-unreachable', { url });
-  }
-  if (!upstream) { log('no-reachable-seed', { tried: seeds.length }); return null; }
+  const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
+  if (!upstream) return null;
 
   // Shape a kernel-Identity for webTransport's authenticated client hello.
   // The bridge's hybrid identity carries privateKey/pubkey(Hex)/idHex but no

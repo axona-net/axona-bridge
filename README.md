@@ -152,6 +152,8 @@ Env vars (see `.env.example`):
 | `BRIDGE_DIRECTORY_MIN_UPTIME_MS` | `300000` | uptime required before this bridge advertises itself (the establishment gate) |
 | `BRIDGE_DIRECTORY_MIN_PEERS` | `3` | mesh peers required before it advertises |
 | `BRIDGE_NEVER_ROOT` | unset (=on) | a bridge never holds a topic role. `0` restores pre-4.46 behaviour — cold-start-only, see below |
+| `BRIDGE_UPSTREAMS` | — | comma-separated upstream bridges to uplink to, tried first (then the bridge book, then the built-in prod bridges) |
+| `BRIDGE_UPSTREAMS_ONLY` | `off` | `on` = fail-closed federation: dial only `BRIDGE_UPSTREAMS`, never the book or the prod bridges; if none answers, exit non-zero before advertising or listening. For a test bridge that must never join production |
 | `MIN_PEER_APP_VERSION` | `3.15.0` | floor for peer-app-versioned clients |
 | `HELLO_TIMEOUT_MS` | — | how long to wait for a peer's authenticated hello before dropping |
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
