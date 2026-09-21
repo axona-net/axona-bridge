@@ -26,18 +26,21 @@ const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 // it roots wherever its address lands, exactly like every other topic
 // (INVARIANT: hosting is decided by ADDRESS, never by who cares about the data).
 //
-// WHERE IT IS PUBLISHED (2.129.0; this comment replaces one that still said
-// "pinned to eagle", which the code had not done since the self-expanding set):
-//   1. every region that already has a bridge — our own geo region and the region
-//      of each bridge we know from entries already seen (self-expanding, no seed);
-//   2. under BRIDGE_REGION=bridge (kernel ≥ 4.88.0), the SYSTEM region 'bridge'
-//      (0xFF) — the one topic that region holds — AND the 'useast' copy, kept for
-//      consumers that pin the directory there (axona-peer 4.38.0, frozen). The
-//      useast copy is retained until a dated council review, not an expiry
-//      (PLAN-v0.4 §4); see DIRECTORY_COMPAT_REGIONS.
+// WHERE IT IS PUBLISHED (2.130.0; David 2026-09-21: "move the bridge topic to eagle
+// instead of 0xFF/bridge — the bridge region should not carry any role at all"):
+//   1. its HOME, the region 'eagle' (0x89), always — every bridge and every client
+//      derive the same (eagle, name) and meet on one topic id; this is also the copy
+//      that pinned consumers read (axona-peer 4.38.0, frozen), so no separate
+//      compatibility copy exists any more;
+//   2. every region that already has a bridge — our own geo region and the region
+//      of each bridge we know from entries already seen (self-expanding, no seed).
+// NEVER the system region 'bridge' (0xFF): a bridge whose id lives there publishes
+// nothing into its own region, so an 0xFF node holds no topic at all while any
+// node of the 0x80–0xBF band is in view (arithmetic, not a fence; the fence is a
+// separate design). 2.129.0 published into 'bridge'; that is withdrawn here.
 const topicIn = (region) => ({ region, name: BRIDGE_DIRECTORY_TOPIC });
-export const DIRECTORY_SYSTEM_REGION = 'bridge';
-export const DIRECTORY_COMPAT_REGIONS = Object.freeze(['useast']);   // review 30 days after the production cutover, then at every kernel promotion (David 2026-09-21); removal on his word only
+export const DIRECTORY_HOME_REGION = 'eagle';                 // the directory's one fixed home (0x89); 'useast' is the same region
+export const DIRECTORY_NEVER_REGIONS = Object.freeze(['bridge']);  // the system region carries no topic; guarded in bridgeRegions()
 
 /**
  * Start publishing this bridge to the directory.
@@ -113,14 +116,13 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
       const key = code === null ? `name:${r}` : `code:${code}`;
       if (!byKey.has(key)) byKey.set(key, r);
     };
+    add(DIRECTORY_HOME_REGION);
     add(regionNameForLatLng(region.lat, region.lng));
     for (const e of (book?.entries?.() ?? [])) add(regionNameForLatLng(e?.lat, e?.lng));
-    // 2.129.0: a bridge whose id lives in the system region publishes the directory THERE (its
-    // only topic) and keeps the compatibility copies so pinned consumers still discover it.
-    if (region.requested === DIRECTORY_SYSTEM_REGION) {
-      add(DIRECTORY_SYSTEM_REGION);
-      for (const r of DIRECTORY_COMPAT_REGIONS) add(r);
-    }
+    // 2.130.0: the system region never receives the directory, whatever this bridge's own
+    // region is. A learned entry can never name it either (no coordinate maps there), but
+    // the guard is explicit so a future caller cannot add it by accident.
+    for (const r of DIRECTORY_NEVER_REGIONS) { const code = resolveRegion(r); byKey.delete(code === null ? `name:${r}` : `code:${code}`); }
     return [...byKey.values()];
   }
 

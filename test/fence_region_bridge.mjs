@@ -20,7 +20,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { KERNEL_VERSION, deriveTopicId, resolveRegion, BRIDGE_DIRECTORY_TOPIC } from '@axona/protocol';
 import { assertRegionApplied, REGION_BYTE_BY_NAME } from '../src/identity.js';
-import { startDirectoryPublisher, DIRECTORY_SYSTEM_REGION, DIRECTORY_COMPAT_REGIONS } from '../src/bridge_directory.js';
+import { startDirectoryPublisher, DIRECTORY_HOME_REGION, DIRECTORY_NEVER_REGIONS } from '../src/bridge_directory.js';
 
 let n = 0, failed = 0;
 const ok = (m, c = true) => { if (c) { n++; console.log('  ok ' + m); } else { failed++; console.log('  ✗  ' + m); } };
@@ -35,7 +35,7 @@ assertRegionApplied('89' + 'a'.repeat(64), null); ok('unset BRIDGE_REGION: any b
 assertRegionApplied('ff' + 'a'.repeat(64), 'bridge'); ok("BRIDGE_REGION=bridge with an 0xff id: accepted");
 assert.throws(() => assertRegionApplied('89' + 'a'.repeat(64), 'bridge'), /does not honour the region override|needs @axona\/protocol >= 4\.88\.0/); ok('BRIDGE_REGION=bridge with a geo id: refuses to start (kernel < 4.88.0)');
 assert.throws(() => assertRegionApplied('ff' + 'a'.repeat(64), 'mars'), /not a region this bridge knows/); ok('unknown BRIDGE_REGION value: refused');
-assert.equal(REGION_BYTE_BY_NAME.bridge, 'ff'); assert.equal(DIRECTORY_SYSTEM_REGION, 'bridge'); assert.deepEqual([...DIRECTORY_COMPAT_REGIONS], ['useast']); ok("constants: bridge → 0xff; compat copy = ['useast']");
+assert.equal(REGION_BYTE_BY_NAME.bridge, 'ff'); assert.equal(DIRECTORY_HOME_REGION, 'eagle'); assert.deepEqual([...DIRECTORY_NEVER_REGIONS], ['bridge']); ok("constants: bridge → 0xff; directory home = 'eagle'; never = ['bridge']");
 
 console.log('\n[2] startDirectoryPublisher with a fake peer — which regions the directory is published to and subscribed in');
 function fakePeer() {
@@ -62,11 +62,12 @@ const east = { lat: 38, lng: -77, label: 'east' };
 {
   const { pubs, subs, events } = await regionsFor({ region: { ...east, requested: 'bridge' } });
   const regions = pubs.map((p) => p.topic.region);
-  ok(`east + BRIDGE_REGION=bridge: published to exactly ['eagle','bridge'] (got ${JSON.stringify(regions)})`, JSON.stringify(regions) === JSON.stringify(['eagle', 'bridge']));
-  ok("…'useast' is the SAME region as the east bridge's own 'eagle' (one publish, not two of one topic id)", resolveRegion('useast') === resolveRegion('eagle') && regions.filter((r) => resolveRegion(r) === 0x89).length === 1);
+  ok(`east + BRIDGE_REGION=bridge: published to exactly ['eagle'] — the home, and NOTHING into 'bridge' (got ${JSON.stringify(regions)})`, JSON.stringify(regions) === JSON.stringify(['eagle']));
+  ok("…the home and the east bridge's own geo region are one region (one publish, not two of one topic id)", resolveRegion('useast') === resolveRegion('eagle') && regions.filter((r) => resolveRegion(r) === 0x89).length === 1);
+  ok("…'bridge' never appears, even though this bridge's own id is 0xFF", !regions.includes('bridge'));
   ok('…every publish names the directory topic and is signed', pubs.every((p) => p.topic.name === BRIDGE_DIRECTORY_TOPIC && p.signed));
   ok('…the entry carries the bridge location and URL', pubs.every((p) => p.entry.lat === 38 && p.entry.lng === -77 && p.entry.url === env.BRIDGE_PUBLIC_URL));
-  ok(`…and it subscribes in the same regions (got ${JSON.stringify(subs.map((s) => s.region))})`, JSON.stringify(subs.map((s) => s.region)) === JSON.stringify(['eagle', 'bridge']));
+  ok(`…and it subscribes in the same regions (got ${JSON.stringify(subs.map((s) => s.region))})`, JSON.stringify(subs.map((s) => s.region)) === JSON.stringify(['eagle']));
   ok('…no publish-failed with the fake peer', !events.some(([e]) => e === 'publish-failed'));
 }
 {
@@ -82,9 +83,9 @@ const east = { lat: 38, lng: -77, label: 'east' };
   const west = { lat: 37.4, lng: -122.1, label: 'west' };
   const { pubs } = await regionsFor({ region: { ...west, requested: 'bridge' } });
   const regions = pubs.map((p) => p.topic.region);
-  ok(`west + BRIDGE_REGION=bridge: published to ['grizzly','bridge','useast'] — its own region, the system region, the compat copy (got ${JSON.stringify(regions)})`, JSON.stringify(regions) === JSON.stringify(['grizzly', 'bridge', 'useast']));
+  ok(`west + BRIDGE_REGION=bridge: published to ['eagle','grizzly'] — the home and its own geo region, nothing into 'bridge' (got ${JSON.stringify(regions)})`, JSON.stringify(regions) === JSON.stringify(['eagle', 'grizzly']));
   const { pubs: pubsUnset } = await regionsFor({ region: { ...west } });
-  ok("west, unset: ['grizzly'] only", JSON.stringify(pubsUnset.map((p) => p.topic.region)) === JSON.stringify(['grizzly']));
+  ok("west, unset: ['eagle','grizzly'] — the home is always published (2.130.0), then its own region", JSON.stringify(pubsUnset.map((p) => p.topic.region)) === JSON.stringify(['eagle', 'grizzly']));
 }
 
 console.log('\n[3] the REAL startup path: loadOrDeriveIdentity in a child process against the installed kernel');
@@ -132,7 +133,7 @@ console.log('\n[4] derivability of the bridge directory on the installed kernel'
   let derived = null, err = null;
   try { derived = await deriveTopicId({ region: 'bridge', name: BRIDGE_DIRECTORY_TOPIC }); } catch (e) { err = e; }
   if (!KERNEL_HONOURS_OVERRIDE) ok(`kernel ${KERNEL_VERSION}: the 'bridge' directory is UNDERIVABLE (${err?.message?.slice(0, 60) ?? 'no error'})`, err !== null && derived === null);
-  else ok(`kernel ${KERNEL_VERSION}: the 'bridge' directory derives to an 'ff' id`, typeof derived === 'string' && derived.startsWith('ff'));
+  else ok(`kernel ${KERNEL_VERSION}: the 'bridge' directory still DERIVES to an 'ff' id — the kernel admits it; this bridge simply never publishes there (the resolver refusal is the 4.89.0 follow-up)`, typeof derived === 'string' && derived.startsWith('ff'));
   ok("the 'useast' copy derives to an 0x89 id on any kernel", (await deriveTopicId({ region: 'useast', name: BRIDGE_DIRECTORY_TOPIC })).startsWith('89'));
 }
 
