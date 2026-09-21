@@ -19,23 +19,25 @@ const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 
 // v0.3: the directory is a well-known OPEN topic. The pre-v0.3 scheme was a
 // public (publisher: null → 0x00 global) topic keyed solely on the topic NAME
-// 'axona:bridge-directory'. v0.3 removes the global region: an open topic must
-// name a real, populated region, and every bridge + client must derive the SAME
-// (region, name) so they meet on one topic id. We pin the directory to the
-// 'eagle' region (the design doc's "deliberate, app-visible hot spot" pattern
-// for a topic the whole network must share) and reuse the kernel's topic-name
-// constant verbatim, so the directory keeps a single canonical placement.
-// The directory is an ORDINARY open topic — nothing hosts it specially, it roots
-// wherever its address lands, exactly like every other topic (INVARIANT: hosting
-// is decided by ADDRESS, never by who cares about the data).
+// 'axona:bridge-directory'. v0.3 removed the global region: an open topic must
+// name a real region, and every bridge + client must derive the SAME (region,
+// name) so they meet on one topic id. The kernel's topic-name constant is reused
+// verbatim. The directory is an ORDINARY open topic — nothing hosts it specially,
+// it roots wherever its address lands, exactly like every other topic
+// (INVARIANT: hosting is decided by ADDRESS, never by who cares about the data).
 //
-// It is published into EVERY region that already has a bridge, not one global
-// region, so no single region's coverage is a dependency for global discovery.
-// The set is self-expanding and needs no seed list: we know our own region, and
-// we learn the others from the directory entries we have already seen (each
-// carries the publishing bridge's lat/lng). A new region joins the set the
-// moment a bridge lands there.
+// WHERE IT IS PUBLISHED (2.129.0; this comment replaces one that still said
+// "pinned to eagle", which the code had not done since the self-expanding set):
+//   1. every region that already has a bridge — our own geo region and the region
+//      of each bridge we know from entries already seen (self-expanding, no seed);
+//   2. under BRIDGE_REGION=bridge (kernel ≥ 4.88.0), the SYSTEM region 'bridge'
+//      (0xFF) — the one topic that region holds — AND the 'useast' copy, kept for
+//      consumers that pin the directory there (axona-peer 4.38.0, frozen). The
+//      useast copy is retained until a dated council review, not an expiry
+//      (PLAN-v0.4 §4); see DIRECTORY_COMPAT_REGIONS.
 const topicIn = (region) => ({ region, name: BRIDGE_DIRECTORY_TOPIC });
+export const DIRECTORY_SYSTEM_REGION = 'bridge';
+export const DIRECTORY_COMPAT_REGIONS = Object.freeze(['useast']);   // review-dated, removal on David's word only
 
 /**
  * Start publishing this bridge to the directory.
@@ -105,6 +107,12 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     for (const e of (book?.entries?.() ?? [])) {
       const r = regionNameForLatLng(e?.lat, e?.lng);
       if (r) set.add(r);
+    }
+    // 2.129.0: a bridge whose id lives in the system region publishes the directory THERE (its
+    // only topic) and keeps the compatibility copies so pinned consumers still discover it.
+    if (region.requested === DIRECTORY_SYSTEM_REGION) {
+      set.add(DIRECTORY_SYSTEM_REGION);
+      for (const r of DIRECTORY_COMPAT_REGIONS) set.add(r);
     }
     return [...set];
   }

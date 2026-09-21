@@ -41,12 +41,33 @@ const GEO_BITS = 8;
 const DEFAULT_LAT = 38.0;     // US-East Virginia
 const DEFAULT_LNG = -77.0;
 
+// BRIDGE_REGION (2.129.0, kernel ≥ 4.88.0): an explicit region for the bridge's node id. The only
+// value with a meaning today is `bridge` — the kernel's SYSTEM region 0xFF, which holds exactly one
+// topic (the directory) and which no coordinate ever produces. Unset = the geo derivation from
+// BRIDGE_LAT/LNG exactly as before. Lat/lng stay the bridge's location for its directory entry.
+const BRIDGE_REGION = (process.env.BRIDGE_REGION ?? '').trim() || null;
+export const REGION_BYTE_BY_NAME = Object.freeze({ bridge: 'ff' });
+
 function regionFromEnv() {
   const lat = parseFloat(process.env.BRIDGE_LAT ?? DEFAULT_LAT);
   const lng = parseFloat(process.env.BRIDGE_LNG ?? DEFAULT_LNG);
   const label = process.env.BRIDGE_REGION_LABEL
     ?? `bridge (${lat.toFixed(2)}, ${lng.toFixed(2)})`;
-  return { lat, lng, label, id: 'bridge' };
+  return { lat, lng, label, id: 'bridge', region: BRIDGE_REGION };
+}
+
+/**
+ * FAIL CLOSED (PLAN-v0.3 §6): when BRIDGE_REGION names a region, the minted id MUST carry that
+ * region's byte. A kernel below 4.88.0 ignores the `region` argument and mints a geo id; that is
+ * not a bridge in the requested region and the process must not come up pretending it is.
+ * Exported for the fence test; called on every start.
+ */
+export function assertRegionApplied(kernelId, requestedRegion) {
+  if (!requestedRegion) return;
+  const want = REGION_BYTE_BY_NAME[requestedRegion];
+  if (!want) throw new Error(`BRIDGE_REGION='${requestedRegion}' is not a region this bridge knows how to request (known: ${Object.keys(REGION_BYTE_BY_NAME).join(', ')})`);
+  const got = String(kernelId).slice(0, 2).toLowerCase();
+  if (got !== want) throw new Error(`BRIDGE_REGION='${requestedRegion}' requested byte 0x${want} but the kernel minted 0x${got}: the kernel does not honour the region override (needs @axona/protocol >= 4.88.0); refusing to start`);
 }
 
 /**
@@ -74,7 +95,8 @@ export async function loadOrDeriveIdentity() {
   // not on the (now-rotating) signer, so clients still find + rank it across
   // restarts; a fresh signer simply re-publishes the same-URL directory entry.
   const labels = regionFromEnv();
-  const kernel = await kernelCreateNodeIdentity({ lat: labels.lat, lng: labels.lng });
+  const kernel = await kernelCreateNodeIdentity({ lat: labels.lat, lng: labels.lng, ...(labels.region ? { region: labels.region } : {}) });
+  assertRegionApplied(kernel.id, labels.region);
   return buildHybrid(kernel, labels);
 }
 
@@ -95,6 +117,10 @@ function buildHybrid(kernel, regionLabels) {
       lng:   kernel.region.lng,
       label: regionLabels.label ?? `bridge (${kernel.region.lat.toFixed(2)}, ${kernel.region.lng.toFixed(2)})`,
       id:    regionLabels.id    ?? 'bridge',
+      // the region NAME the id byte was minted in: 'bridge' under BRIDGE_REGION=bridge, else the geo name is
+      // not known here (the kernel folds lat/lng); healthz/diag report `region` as the label and
+      // `regionRequested` as this field so an operator can see the two apart.
+      requested: regionLabels.region ?? null,
     },
     createdAt:  kernel.createdAt,
     // Kernel

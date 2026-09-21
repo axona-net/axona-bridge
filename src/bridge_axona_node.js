@@ -192,8 +192,10 @@ export class BridgeAxonaNode {
     // to the bridge was silently dropped.
     //
     // Because the bridge is in every peer's synaptome (universal
-    // connector) and is XOR-close to regional topics (its 0x89 us-east
-    // prefix matches us-east/* topic IDs), peers routinely pick the
+    // connector) and, with a geo id, is XOR-close to its own region's
+    // topics (a 0x89 prefix matches eagle topic IDs; under
+    // BRIDGE_REGION=bridge the id byte is 0xFF and this closeness goes
+    // away, 2.129.0), peers routinely picked the
     // bridge as a K-closest axon — and it black-holed those
     // subscriptions, so publishes routed by other peers reached some
     // subscribers and missed others (the cross-app delivery asymmetry).
