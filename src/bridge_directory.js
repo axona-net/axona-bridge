@@ -34,10 +34,15 @@ const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 //      compatibility copy exists any more;
 //   2. every region that already has a bridge — our own geo region and the region
 //      of each bridge we know from entries already seen (self-expanding, no seed).
-// NEVER the system region 'bridge' (0xFF): a bridge whose id lives there publishes
-// nothing into its own region, so an 0xFF node holds no topic at all while any
-// node of the 0x80–0xBF band is in view (arithmetic, not a fence; the fence is a
-// separate design). 2.129.0 published into 'bridge'; that is withdrawn here.
+// NEVER the system region 'bridge' (0xFF) — from THIS publisher and subscriber. That
+// is the whole of what this file guarantees: this bridge's publish/subscribe set holds
+// eagle, its own geo region and learned regions, and never 'bridge'. It does NOT make
+// an 0xFF node hold nothing: kernel 4.88.0 still admits a directory descriptor in 0xFF
+// from any other publisher; a node in 0xFF can still be selected as a backup or replica,
+// or root a topic, whenever eligible nearer candidates are unavailable to the selecting
+// node; and replicas of the 0xFF directory already held elsewhere expire only if no
+// publisher refreshes them. Refusing 0xFF descriptors in the resolver, and any fence on
+// roles for a system-region node, are separate designs (kernel 4.89.0 follow-up).
 const topicIn = (region) => ({ region, name: BRIDGE_DIRECTORY_TOPIC });
 export const DIRECTORY_HOME_REGION = 'eagle';                 // the directory's one fixed home (0x89); 'useast' is the same region
 export const DIRECTORY_NEVER_REGIONS = Object.freeze(['bridge']);  // the system region carries no topic; guarded in bridgeRegions()
@@ -119,9 +124,10 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     add(DIRECTORY_HOME_REGION);
     add(regionNameForLatLng(region.lat, region.lng));
     for (const e of (book?.entries?.() ?? [])) add(regionNameForLatLng(e?.lat, e?.lng));
-    // 2.130.0: the system region never receives the directory, whatever this bridge's own
-    // region is. A learned entry can never name it either (no coordinate maps there), but
-    // the guard is explicit so a future caller cannot add it by accident.
+    // 2.130.0: THIS bridge never publishes or subscribes the directory in the system
+    // region, whatever its own region is. A learned entry can never name it either (no
+    // coordinate maps there), but the guard is explicit so a future caller cannot add it
+    // by accident. Local property only — see the header for what it does not guarantee.
     for (const r of DIRECTORY_NEVER_REGIONS) { const code = resolveRegion(r); byKey.delete(code === null ? `name:${r}` : `code:${code}`); }
     return [...byKey.values()];
   }

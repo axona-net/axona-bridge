@@ -161,7 +161,7 @@ Env vars (see `.env.example`):
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
 | `TURN_AUTH_SECRET` | — | shared secret for minting `use-auth-secret` TURN credentials (also read by coturn) |
 | `BRIDGE_LAT` / `BRIDGE_LNG` / `BRIDGE_REGION_LABEL` | — | the bridge's geographic anchor (sets its S2 region prefix unless `BRIDGE_REGION` is set; always its location in the directory entry) |
-| `BRIDGE_REGION` | unset | `bridge` (kernel ≥ 4.88.0): mint the node id in the SYSTEM region 0xFF. A kernel that does not honour the override makes the bridge **refuse to start** (the minted byte is checked). The directory is NOT published into 0xFF: its home is `eagle` (2.130.0, David 2026-09-21), so an 0xFF bridge holds no topic of its own region at all. Testnet-first; see `ops/region-0xff/` in the workspace. |
+| `BRIDGE_REGION` | unset | `bridge` (kernel ≥ 4.88.0): mint the node id in the SYSTEM region 0xFF. A kernel that does not honour the override makes the bridge **refuse to start** (the minted byte is checked). This bridge publishes and subscribes the directory in `eagle` (its home, 2.130.0, David 2026-09-21) and never in `bridge`; that is a property of this publisher only — the kernel still admits an 0xFF directory descriptor from other publishers, and no fence stops an 0xFF node from taking a role when nearer candidates are unavailable (separate design). Testnet-first; see `ops/region-0xff/` in the workspace. |
 
 ## Logging
 
