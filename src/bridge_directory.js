@@ -13,7 +13,7 @@
 // advertise itself into the public directory the production apps consume.
 // =====================================================================
 
-import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry, createAuthorIdentity, regionNameForLatLng } from '@axona/protocol';
+import { BRIDGE_DIRECTORY_TOPIC, buildBridgeEntry, createAuthorIdentity, regionNameForLatLng, resolveRegion } from '@axona/protocol';
 
 const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 
@@ -101,20 +101,27 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
    * and it converges as the book fills.
    */
   function bridgeRegions() {
-    const set = new Set();
-    const own = regionNameForLatLng(region.lat, region.lng);
-    if (own) set.add(own);
-    for (const e of (book?.entries?.() ?? [])) {
-      const r = regionNameForLatLng(e?.lat, e?.lng);
-      if (r) set.add(r);
-    }
+    // Keyed by the RESOLVED region code, not the spelling: 'useast' and 'eagle' are one
+    // region (0x89), so an east bridge's own region and the compatibility copy are ONE
+    // publish, not two of the same topic id. A name the installed kernel cannot resolve
+    // ('bridge' below 4.88.0) is kept by its spelling; the publish then fails loudly and
+    // is logged, never silently folded elsewhere.
+    const byKey = new Map();
+    const add = (r) => {
+      if (!r) return;
+      const code = resolveRegion(r);
+      const key = code === null ? `name:${r}` : `code:${code}`;
+      if (!byKey.has(key)) byKey.set(key, r);
+    };
+    add(regionNameForLatLng(region.lat, region.lng));
+    for (const e of (book?.entries?.() ?? [])) add(regionNameForLatLng(e?.lat, e?.lng));
     // 2.129.0: a bridge whose id lives in the system region publishes the directory THERE (its
     // only topic) and keeps the compatibility copies so pinned consumers still discover it.
     if (region.requested === DIRECTORY_SYSTEM_REGION) {
-      set.add(DIRECTORY_SYSTEM_REGION);
-      for (const r of DIRECTORY_COMPAT_REGIONS) set.add(r);
+      add(DIRECTORY_SYSTEM_REGION);
+      for (const r of DIRECTORY_COMPAT_REGIONS) add(r);
     }
-    return [...set];
+    return [...byKey.values()];
   }
 
   // ── ESTABLISHMENT GATE (2026-07-27) ───────────────────────────────────
