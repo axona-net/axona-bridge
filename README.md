@@ -57,7 +57,7 @@ on its signer, so clients still discover, rank, and fail over to it across resta
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.101.0"}
+# → {"ts":"…","level":"info","event":"listen","port":8080,"logLevel":"info","version":"2.129.0"}
 ```
 
 Smoke tests:
@@ -75,7 +75,7 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","connections":0,"uptimeS":12,"version":"2.115.0","kernelVersion":"4.73.1",…}
+# {"status":"ok","connections":0,"uptimeS":12,"version":"2.129.0","kernelVersion":"4.88.0",…}
 ```
 
 ## Wire format
