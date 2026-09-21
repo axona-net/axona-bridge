@@ -6,10 +6,11 @@
 //   2. startDirectoryPublisher with a FAKE peer: the regions actually published to and subscribed in,
 //      under BRIDGE_REGION=bridge and when unset, east and west; one publish per region CODE ('useast' and
 //      'eagle' are one region).
-//   3. The REAL loadOrDeriveIdentity in a child process against the INSTALLED kernel (the pinned 4.87.0
-//      today): BRIDGE_REGION=bridge refuses to start with the fail-closed message; unset mints a geo id;
-//      nothing is written to the child's cwd or HOME. Version-conditioned: once the pin is >= 4.88.0 the
-//      same child must come up with an 'ff' id instead.
+//   3. The REAL loadOrDeriveIdentity in a child process against the INSTALLED kernel, whatever the pin
+//      is today: below 4.88.0, BRIDGE_REGION=bridge refuses to start with the fail-closed message; at or
+//      above it, the same child comes up with an 'ff' id. Unset mints a geo id on any kernel; nothing is
+//      written to the child's cwd or HOME in any case. (Refusal was exercised at pin 4.87.0; the success
+//      path at pin 4.88.0.)
 //   4. Derivability of the 'bridge' directory on the installed kernel, version-conditioned the same way.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
