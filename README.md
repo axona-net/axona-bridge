@@ -161,7 +161,7 @@ Env vars (see `.env.example`):
 | `TURN_URLS` | — | comma-separated TURN URLs handed to browsers (e.g. `turn:turn.axona.net:3478`) |
 | `TURN_AUTH_SECRET` | — | shared secret for minting `use-auth-secret` TURN credentials (also read by coturn) |
 | `BRIDGE_LAT` / `BRIDGE_LNG` / `BRIDGE_REGION_LABEL` | — | the bridge's geographic anchor (sets its S2 region prefix unless `BRIDGE_REGION` is set; always its location in the directory entry) |
-| `BRIDGE_REGION` | unset | `bridge` (kernel ≥ 4.88.0): mint the node id in the SYSTEM region 0xFF, which holds exactly one topic — the directory. The bridge then publishes the directory into `bridge` **and** keeps the `useast` copy for pinned consumers (axona-peer 4.38.0); that copy is removed only after a dated council review. A kernel that does not honour the override makes the bridge **refuse to start** (the minted byte is checked). Testnet-first; see `ops/region-0xff/` in the workspace. |
+| `BRIDGE_REGION` | unset | `bridge` (kernel ≥ 4.88.0): mint the node id in the SYSTEM region 0xFF, which holds exactly one topic — the directory. The bridge then publishes the directory into `bridge` **and** keeps the `useast` copy for pinned consumers (axona-peer 4.38.0); that copy is reviewed by council **30 days after the production cutover** and at every kernel promotion after that (David, 2026-09-21), and removed only on his word once the consumers still subscribing at `useast` are shown migrated or he accepts breaking them. A kernel that does not honour the override makes the bridge **refuse to start** (the minted byte is checked). Testnet-first; see `ops/region-0xff/` in the workspace. |
 
 ## Logging
 

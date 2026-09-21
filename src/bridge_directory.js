@@ -37,7 +37,7 @@ const HOUR_MS = 60 * 60 * 1000;   // heartbeat cadence — see the timer below
 //      (PLAN-v0.4 §4); see DIRECTORY_COMPAT_REGIONS.
 const topicIn = (region) => ({ region, name: BRIDGE_DIRECTORY_TOPIC });
 export const DIRECTORY_SYSTEM_REGION = 'bridge';
-export const DIRECTORY_COMPAT_REGIONS = Object.freeze(['useast']);   // review-dated, removal on David's word only
+export const DIRECTORY_COMPAT_REGIONS = Object.freeze(['useast']);   // review 30 days after the production cutover, then at every kernel promotion (David 2026-09-21); removal on his word only
 
 /**
  * Start publishing this bridge to the directory.
