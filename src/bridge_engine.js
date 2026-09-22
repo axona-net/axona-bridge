@@ -21,6 +21,10 @@ import { depositDispatchCapability } from '@axona/protocol/registry/index.js';
 export class BridgeEngine {
   constructor(config = {}) {
     const r = config.rules ?? {};
+    // Bridge-Air-Gap-Plan v0.3 §7.1.4 / D3: the live set of named directory topic
+    // ids (lower-hex) this bridge may root. Owned by BridgeAxonaNode; the manager
+    // reads it at every role decision, so a copy learned later is admitted too.
+    this.rootAllowList = config.rootAllowList instanceof Set ? config.rootAllowList : new Set();
 
     // ── Routing / structural constants ───────────────────────────────
     this._k                  = config.k                  ?? 20;
@@ -179,17 +183,15 @@ export class BridgeEngine {
             return false;
           }
         }
-        // Probe: is the target's connId currently bound + WS open on
-        // our WebSocketTransport?  If yes, direct delivery works.
+        // A direct message goes to a DIRECTLY CONNECTED peer or nowhere.
+        // Bridge-Air-Gap-Plan v0.3 §7.2: the routed `__tunneled_direct__`
+        // fallback that used to live here is closed — a bridge originates no
+        // transit, and tunnelling a direct frame through route_msg was exactly
+        // one more way for it to. Not connected ⇒ false, counted by the caller.
         if (node.transport?.isConnected?.(peerId)) {
           return peer.sendDirect(peerId, type, payload);
         }
-        peer.routeMessage(peerId, '__tunneled_direct__', {
-          targetId:  peerId.toString(16).padStart(66, '0'),
-          innerType: type,
-          innerPayload: payload,
-        }).catch(err => console.error('BridgeEngine routed sendDirect failed:', err));
-        return true;
+        return false;
       },
       // REF-1.1 E3b.2c (kernel 4.63+): the public peer.onRoutedMessage is
       // sealed. Routed handlers install by writing the peer's handler table
@@ -241,11 +243,15 @@ export class BridgeEngine {
     // become a root even when every other candidate in the neighbourhood is
     // saturated or still in grace.
     //
-    // Env escape hatch: BRIDGE_NEVER_ROOT=0 restores pre-4.46 behaviour. Needed
-    // for a bridge-only network (a fresh deployment with no relays yet), where
-    // refusing all roots would leave the bridge's own directory topic unrooted.
-    const neverRoot = process.env.BRIDGE_NEVER_ROOT !== '0';
-    const axon = new AxonaManager({ dht, neverRoot });
+    // Bridge-Air-Gap-Plan v0.3 §7.1.4, D3 (kernel 4.89.0): the role matrix
+    // replaces the neverRoot bit. `introductionOnly` refuses EVERY role at the
+    // HARD tier — pushed backup/heir/child included — except self-claimed ROOT of
+    // a topic in `rootAllowList`, which is the named directory copies this bridge
+    // serves. That closes the BRIDGE_NEVER_ROOT=0 hole (a bridge-only network
+    // needs its directory rooted, and =0 let it root ANYTHING): the directory
+    // roots, nothing else does. BRIDGE_NEVER_ROOT is no longer read; a set value
+    // is logged once at startup by server.js so an operator sees it is inert.
+    const axon = new AxonaManager({ dht, introductionOnly: true, rootAllowList: this.rootAllowList });
     this._axonByNode.set(node, axon);
     return axon;
   }

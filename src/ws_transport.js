@@ -23,6 +23,7 @@
 
 import { Transport } from '@axona/protocol';
 import { depositDispatchCapability } from '@axona/protocol/registry/index.js';
+import { AirGap } from './air_gap.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
@@ -38,7 +39,7 @@ export class WebSocketTransport extends Transport {
    * @param {(connId: string) => boolean} opts.isConnOpen
    * @param {(event:string, data?:object) => void} [opts.log]
    */
-  constructor({ localNodeId, sendToConn, isConnOpen, log }) {
+  constructor({ localNodeId, sendToConn, isConnOpen, log, airGap = null }) {
     super();
     if (typeof localNodeId !== 'bigint') {
       throw new TypeError('WebSocketTransport: localNodeId must be bigint');
@@ -51,6 +52,13 @@ export class WebSocketTransport extends Transport {
     this._sendToConn  = sendToConn;
     this._isConnOpen  = isConnOpen;
     this._log         = log ?? (() => {});
+    // Bridge-Air-Gap-Plan §7.2: the ingress partition and per-connection bounds
+    // for every `axona` frame this transport receives. One instance per bridge,
+    // shared with server.js (bare frames, egress) — a private one only in tests.
+    this._airGap      = airGap instanceof AirGap ? airGap : new AirGap({ selfId: localNodeId });
+    /** @type {Map<string, number>} connId → bind generation (bumped on every bindPeer) */
+    this._generationByConnId = new Map();
+    this._generationSeq = 0;
 
     this._reqHandlers = new Map();
     this._ntfHandlers = new Map();
@@ -100,12 +108,32 @@ export class WebSocketTransport extends Transport {
     if (typeof connId !== 'string') throw new TypeError('connId must be string');
     this._connIdByNodeId.set(nodeId, connId);
     this._nodeIdByConnId.set(connId, nodeId);
+    this._generationByConnId.set(connId, ++this._generationSeq);
   }
+
+  get airGap() { return this._airGap; }
+
+  /**
+   * Bridge-Air-Gap-Plan v0.3 §7.1.2: every connection this transport owns is an
+   * INTRODUCTION edge — never a next hop, never a role edge. Unbound ⇒ 'unknown'
+   * (fails closed at the kernel).
+   */
+  capabilityFor(nodeId) {
+    const connId = this._connIdByNodeId.get(nodeId);
+    return (connId != null && this._isConnOpen(connId)) ? 'introduction' : 'unknown';
+  }
+  generationFor(nodeId) {
+    const connId = this._connIdByNodeId.get(nodeId);
+    return connId != null ? (this._generationByConnId.get(connId) ?? 0) : 0;
+  }
+  ownsPeer(nodeId) { return this._connIdByNodeId.has(nodeId); }
+  boundPeers() { return [...this._connIdByNodeId.keys()]; }
 
   unbindPeer(connId) {
     const nodeId = this._nodeIdByConnId.get(connId);
     if (nodeId !== undefined) this._connIdByNodeId.delete(nodeId);
     this._nodeIdByConnId.delete(connId);
+    this._generationByConnId.delete(connId);
   }
 
   connIdFor(nodeId) { return this._connIdByNodeId.get(nodeId) ?? null; }
@@ -207,36 +235,46 @@ export class WebSocketTransport extends Transport {
    * message arrives on a WebSocket.  `connId` is the per-WebSocket
    * id the bridge assigned in `welcome`.
    */
-  handleIncoming(connId, payload) {
-    if (!payload || typeof payload !== 'object') return;
+  handleIncoming(connId, payload, { admitted = true } = {}) {
     const fromNodeId = this._nodeIdByConnId.get(connId) ?? null;
-
-    if (payload.k === 'req') {
-      this._handleRequest(connId, fromNodeId, payload);
-    } else if (payload.k === 'res') {
-      this._handleResponse(payload);
-    } else if (payload.k === 'ntf') {
-      this._handleNotification(connId, fromNodeId, payload);
+    // Bridge-Air-Gap-Plan v0.4 §7.2.2: ONE outcome per received frame, decided
+    // here before any handler runs. A refused request gets exactly one reply
+    // (§7.2.3); a dropped notification gets none; a response is never replied.
+    const { outcome, reply } = this._airGap.axona(connId, payload, {
+      admitted,
+      hasPending: (id) => this._pending.has(id),
+    });
+    if (outcome === 'responseMatched') { this._handleResponse(payload); return outcome; }
+    if (outcome !== 'dispatchedLocal') {
+      // No reply to an unadmitted socket: it has not passed client-hello and
+      // nothing is owed to it (server.js closes it at the hello timeout).
+      if (reply && admitted) this._reply(connId, payload.id, false, reply, payload.type);
+      return outcome;
     }
+    if (payload.k === 'req')      this._handleRequest(connId, fromNodeId, payload);
+    else if (payload.k === 'ntf') this._handleNotification(connId, fromNodeId, payload);
+    return outcome;
   }
 
   async _handleRequest(connId, fromNodeId, msg) {
     const handler = this._reqHandlers.get(msg.type);
     if (!handler) {
-      this._reply(connId, msg.id, false, { error: `no handler for '${msg.type}'` });
+      this._reply(connId, msg.id, false, { error: `no handler for '${msg.type}'` }, msg.type);
       return;
     }
     try {
       const result = await handler(fromNodeId, msg.body);
-      this._reply(connId, msg.id, true, result);
+      this._reply(connId, msg.id, true, result, msg.type);
     } catch (err) {
-      this._reply(connId, msg.id, false, { error: err.message ?? String(err) });
+      this._reply(connId, msg.id, false, { error: err.message ?? String(err) }, msg.type);
     }
   }
 
-  _reply(connId, id, ok, body) {
+  /** `reqType` rides out-of-band to the physical write so the egress classifier
+   *  (v0.5 §7.2.6) can tell a discoveryReply from a controlReply. */
+  _reply(connId, id, ok, body, reqType = null) {
     try {
-      this._sendToConn(connId, { type: 'axona', payload: { k: 'res', id, ok, body } });
+      this._sendToConn(connId, { type: 'axona', payload: { k: 'res', id, ok, body } }, { reqType });
     } catch (err) {
       this._log('reply-failed', { connId, id, err: err.message });
     }
@@ -283,5 +321,6 @@ export class WebSocketTransport extends Transport {
       p.reject(new Error('peer-died'));
     }
     this.unbindPeer(connId);
+    this._airGap.releaseSlot(connId);
   }
 }

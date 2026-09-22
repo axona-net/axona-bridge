@@ -53,6 +53,7 @@ import { selectAnchors }   from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
 import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
+import { MAX_PAYLOAD_BYTES } from './air_gap.js';
 
 // Derive from package.json so /healthz never drifts from the deployed build
 // (the hardcoded literal lagged twice — showed 2.18.0 then 2.19.0 while
@@ -511,9 +512,20 @@ function bigintReviver(_key, value) {
   return value;
 }
 
-function sendTo(peerId, msg) {
+// Bridge-Air-Gap-Plan v0.5 §7.2.6 write point 1: EVERY frame to a client socket
+// passes here and is classified before the physical write. `genericTransit` —
+// any write carrying another node's traffic — is counted and NOT written. `meta`
+// rides out-of-band from the call site: { reqType } for an `axona` res,
+// { inReplyTo } for a bare reply (a peer-list on admission and a peer-list
+// answering a request are the same shape; only the cause differs).
+function sendTo(peerId, msg, meta = undefined) {
   const conn = connections.get(peerId);
   if (!conn) return false;
+  const { cls, allowed } = bridgeNode.airGap.egressWrite('client', msg, meta);
+  if (!allowed) {
+    logErr('egress-refused', { connId: peerId, cls, type: msg?.type, inner: msg?.payload?.type });
+    return false;
+  }
   try {
     conn.ws.send(JSON.stringify(msg, bigintReplacer));
     return true;
@@ -532,6 +544,7 @@ function broadcast(msg, exceptId = null) {
   for (const [id, conn] of connections) {
     if (id === exceptId)  continue;
     if (!conn.admitted)   continue;
+    if (!bridgeNode.airGap.egressWrite('client', msg).allowed) continue;   // §7.2.6, same gate as sendTo
     try {
       conn.ws.send(JSON.stringify(msg, bigintReplacer));
       count++;
@@ -625,7 +638,7 @@ setInterval(maybeGraduate, GRADUATION_INTERVAL_MS).unref?.();
 // WebSocket connections; no node-webrtc dependency.  See
 // `bridge_axona_node.js` and `ws_transport.js` for the wire shape.
 const bridgeNode = new BridgeAxonaNode({
-  sendToConn: (connId, msg) => sendTo(connId, msg),
+  sendToConn: (connId, msg, meta) => sendTo(connId, msg, meta),   // meta: egress class hints (§7.2.6)
   isConnOpen: (connId) => connections.has(connId),
   // axona/4 — close a connection with the Upgrade-Required code when its
   // peer can't complete the authenticated handshake (e.g. it speaks the
@@ -641,6 +654,15 @@ const bridgeNode = new BridgeAxonaNode({
   log: (event, detail) => logDebug(`axona:${event}`, detail),
 });
 await bridgeNode.start();
+if (process.env.BRIDGE_NEVER_ROOT !== undefined) {
+  log('config-inert', { key: 'BRIDGE_NEVER_ROOT', note: 'no longer read (2.132.0): the role matrix is introductionOnly + rootAllowList' });
+}
+// v0.5 §7.2.4: one aggregated air-gap row per minute, only when something was
+// refused, dropped, oversize or unwritten in the interval.
+setInterval(() => {
+  const d = bridgeNode.airGap.drainLog();
+  if (d) log('air-gap', d);
+}, 60_000).unref();
 log('axona-ready', {
   nodeId: idToHex(bridgeNode.nodeId),
   region: bridgeNode.identity.region.label,
@@ -742,6 +764,7 @@ const directory = startDirectoryPublisher({
   book:     bridgeBook,
   authorStore,
   log:      (event, detail) => log(`directory:${event}`, detail),
+  allowRegion: (r) => bridgeNode.allowDirectoryRegion(r),   // D3: each served copy may root here
 });
 
 // Bootstrap into the mesh as a node (non-fatal, background). Once the uplink
@@ -883,6 +906,12 @@ const httpServer = http.createServer((req, res) => {
           lastStallMs,
           lastStallAgoS: lastStallEndAt ? Math.floor((Date.now() - lastStallEndAt) / 1000) : null,
         },
+        // Bridge-Air-Gap-Plan §7.2: the ingress partition (one outcome per
+        // decoded message), the two transport-level labels, the egress classes
+        // per physical write point, and the directory protocol counters.
+        // OPERATOR-ONLY: refusal tallies by type say what the mesh is trying to
+        // push through this bridge.
+        airGap: bridgeNode.airGap.snapshot(),
       });
     }
     res.writeHead(200, {
@@ -984,6 +1013,8 @@ const httpServer = http.createServer((req, res) => {
         try { const a = axon?.inspectAdmission?.(); return a ? safeContext(a) : null; } catch { return null; }
       })(),
       kernelLog: { ...kernelLog.stats(), armed: kernelLog.installed, intakes: kernelLog.intakes, latTrace: latTraceOn() },
+      airGap: bridgeNode.airGap.snapshot(),
+      rootAllowList: [...bridgeNode.rootAllowList],
       // The connections list shows BOTH admitted & pending so we can
       // see peers stuck in the client-hello race or post-admit but
       // pre-handshake.
@@ -1022,7 +1053,11 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // ── WebSocket server ─────────────────────────────────────────────────
-const wss = new WebSocketServer({ server: httpServer });
+// D5 (Bridge-Air-Gap-Plan): one WebRTC data-channel message is ~16 KiB and no
+// bridge frame is larger. `ws` rejects an over-size frame before decode with a
+// local WS_ERR_UNSUPPORTED_MESSAGE_LENGTH error and a 1009 close (counted
+// separately below, v0.6 O6). Before this the `ws` default of 100 MiB applied.
+const wss = new WebSocketServer({ server: httpServer, maxPayload: MAX_PAYLOAD_BYTES });
 
 wss.on('connection', (ws, req) => {
   const id = `c${(++connSeq).toString(36)}`;
@@ -1183,7 +1218,11 @@ wss.on('connection', (ws, req) => {
     // idle on top of that.
     conn.lastSeenAt = Date.now();
 
+    // Bridge-Air-Gap-Plan v0.4 §7.2.2 / v0.6: every message handed to the
+    // decoder lands in exactly one outcome bucket, decode failures included.
+    const airGap = bridgeNode.airGap;
     if (isBinary) {
+      airGap.invalid(id);
       logDebug('binary-dropped', { connId: id, bytes: data.length });
       return;
     }
@@ -1191,14 +1230,37 @@ wss.on('connection', (ws, req) => {
     try {
       msg = JSON.parse(data.toString(), bigintReviver);
     } catch (err) {
+      airGap.invalid(id);
       logErr('bad-json', { connId: id, err: err.message });
       return;
     }
+    if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {
+      airGap.invalid(id);
+      logDebug('bad-envelope', { connId: id });
+      return;
+    }
+    if (msg.type === 'axona') {
+      // The transport owns the partition for axona frames (req/res/ntf), the
+      // per-connection bounds, the route_msg gate and the single refusal reply.
+      if (!msg.payload || typeof msg.payload !== 'object') { airGap.invalid(id); return; }
+      const outcome = bridgeNode.handleAxonaFrame(id, msg.payload, { admitted: conn.admitted });
+      if (outcome !== 'dispatchedLocal' && outcome !== 'responseMatched') {
+        logDebug('axona-frame-not-dispatched', { connId: id, outcome, k: msg.payload.k, type: msg.payload.type });
+      }
+      return;
+    }
+    // Bare frames: allow-list, once-per-connection and rate bounds, admission.
+    {
+      const outcome = airGap.bare(id, msg, { admitted: conn.admitted });
+      if (outcome !== 'dispatchedLocal') {
+        logDebug('bare-frame-not-dispatched', { connId: id, outcome, type: msg.type });
+        return;
+      }
+    }
 
     // Version gate.  Before client-hello passes, the ONLY message we
-    // accept is client-hello itself.  Everything else (ping, signal,
-    // axona, etc.) is silently dropped so we don't leak state — and
-    // never relay axona-protocol frames from un-validated peers.
+    // accept is client-hello itself (the partition above already dropped
+    // and counted everything else — the bound is zero before admission).
     if (!conn.admitted) {
       if (msg.type !== 'client-hello') {
         logDebug('pre-hello-message-dropped', { connId: id, type: msg.type });
@@ -1290,7 +1352,7 @@ wss.on('connection', (ws, req) => {
           if (!otherConn.admitted) continue;
           admittedPeers.push(otherId);
         }
-        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() }, { inReplyTo: 'peer-list-request' });
         log('peer-list-rerequest', { connId: id, peers: admittedPeers.length });
         break;
       }
@@ -1305,16 +1367,15 @@ wss.on('connection', (ws, req) => {
           conn.meshBound   = msg.meshBound;
           conn.meshBoundAt = Date.now();
         }
-        try {
-          ws.send(JSON.stringify({
-            type:    'pong',
-            t:       msg.t,                // echo client timestamp unchanged
-            serverT: Date.now(),
-          }));
+        if (sendTo(id, {
+          type:    'pong',
+          t:       msg.t,                // echo client timestamp unchanged
+          serverT: Date.now(),
+        }, { inReplyTo: 'ping' })) {
           conn.pongs++;
           logDebug('pong', { connId: id, n: conn.pings });
-        } catch (err) {
-          logErr('pong-send-failed', { connId: id, err: err.message });
+        } else {
+          logErr('pong-send-failed', { connId: id });
         }
         break;
       }
@@ -1327,20 +1388,11 @@ wss.on('connection', (ws, req) => {
         // credential and return it in a `turn` frame. Admitted peers only.
         if (!conn.admitted) break;
         const turn = makeTurnCredential(id);
-        if (turn) sendTo(id, { type: 'turn', turn, serverT: Date.now() });
+        if (turn) sendTo(id, { type: 'turn', turn, serverT: Date.now() }, { inReplyTo: 'turn-refresh' });
         logDebug('turn-refresh', { connId: id, minted: !!turn });
         break;
       }
 
-      case 'axona': {
-        // Axona wire frame from the peer.  The transport unpacks
-        // req/res/ntf, dispatches to handlers, and writes the
-        // response back through the same connection.
-        if (msg.payload && typeof msg.payload === 'object') {
-          bridgeNode.handleAxonaFrame(id, msg.payload);
-        }
-        break;
-      }
 
       case 'signal': {
         // Relay opaque SDP / ICE between peers.  The bridge does not
@@ -1351,11 +1403,12 @@ wss.on('connection', (ws, req) => {
           logErr('signal-missing-to', { connId: id });
           break;
         }
-        if (!connections.has(to)) {
-          // Recipient is gone — silently drop.  This is a normal race:
-          // a peer-left event raced past the signaling message.  We
-          // don't surface an error to the sender because the sender
-          // will receive `peer-left` and clean up on its own.
+        if (!connections.get(to)?.admitted) {
+          // Recipient is gone or not yet admitted — drop, counted (v0.4
+          // §7.2.1: destination must be admitted). A gone recipient is a
+          // normal race: a peer-left event raced past the signaling message;
+          // the sender will receive `peer-left` and clean up on its own.
+          airGap.signalDropped(id);
           logDebug('signal-drop-unknown-to', { connId: id, to });
           break;
         }
@@ -1365,8 +1418,11 @@ wss.on('connection', (ws, req) => {
           payload: msg.payload,
         });
         if (delivered) {
+          airGap.signalRelayed(id);
           conn.signalsRelayed++;
           logDebug('signal-relay', { from: id, to, n: conn.signalsRelayed });
+        } else {
+          airGap.signalDropped(id);
         }
         break;
       }
@@ -1378,6 +1434,8 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', (code, reason) => {
     const lifeS = Math.floor((Date.now() - since) / 1000);
+    // v0.6 O6: 1009 is a neutral label — a remote peer can send that code too.
+    if (code === 1009) bridgeNode.airGap.close1009(id);
     if (conn.helloTimer) {
       clearTimeout(conn.helloTimer);
       conn.helloTimer = null;
@@ -1413,6 +1471,7 @@ wss.on('connection', (ws, req) => {
       null,   // peer is already removed from the registry
     );
 
+    bridgeNode.airGap.releaseSlot(id);
     log('disconnect', {
       connId:    id,
       nodeId:    departedNodeId ? departedNodeId.slice(0, 12) : null,   // departure-hint subject (#364-B)
@@ -1428,7 +1487,9 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('error', (err) => {
-    logErr('ws-error', { connId: id, err: err.message });
+    // v0.6 O6: the ONLY event that proves a local size rejection.
+    if (err?.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH') bridgeNode.airGap.oversizeLocal(id);
+    logErr('ws-error', { connId: id, code: err?.code ?? null, err: err.message });
   });
 });
 

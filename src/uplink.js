@@ -52,7 +52,7 @@ function probe(url, timeoutMs = 4000) {
  * @param {string} [o.selfUrl] this bridge's own advertised url (excluded)
  * @param {(event:string, detail?:object)=>void} [o.log]
  */
-export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {} }) {
+export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, airGap = null }) {
   const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
   if (!upstream) return null;
 
@@ -68,12 +68,25 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     pow:        typeof identity.pow === 'string' ? identity.pow : '',
   };
 
+  // Bridge-Air-Gap-Plan v0.5 §7.2.6 write point 2: the uplink socket. The
+  // kernel's bridge transport writes through the WebSocket class we hand it, so
+  // classifying `send` on a subclass instruments EXACTLY that write — a
+  // genericTransit frame is counted and not written. Frames are small JSON text.
+  const UplinkSocket = airGap ? class extends WebSocketImpl {
+    send(data, ...rest) {
+      let msg = null;
+      try { msg = typeof data === 'string' ? JSON.parse(data) : null; } catch { msg = null; }
+      const { allowed } = airGap.egressWrite('uplink', msg);
+      if (!allowed) { log('egress-refused', { point: 'uplink', type: msg?.type, inner: msg?.payload?.type }); return; }
+      return super.send(data, ...rest);
+    }
+  } : WebSocketImpl;
   const transport = webTransport({
     bridgeUrl: upstream,
     identity:  uplinkIdentity,
     meshRelay: true,        // integrate fully (help relay signaling like a relay)
     reconnect: true,        // self-heal the uplink to this upstream
-    WebSocketImpl,
+    WebSocketImpl: UplinkSocket,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });
 

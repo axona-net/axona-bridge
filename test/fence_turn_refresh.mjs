@@ -28,7 +28,9 @@ const H_START = SERVER.indexOf("case 'turn-refresh': {");
 // End at the NEXT case, not the first `break;` — the handler's very first
 // statement is `if (!conn.admitted) break;`, so anchoring on `break;` would
 // truncate the slice before the mint/reply (the reason this fence first failed).
-const H_END   = H_START >= 0 ? SERVER.indexOf("case 'axona'", H_START) : -1;
+// 2.132.0: the `axona` arm left the switch (the air-gap partition dispatches it
+// before the switch), so the handler ends at whichever case follows it.
+const H_END   = H_START >= 0 ? SERVER.indexOf("\n      case '", H_START + 1) : -1;
 if (H_START < 0 || H_END < 0) {
   console.error('  ✗ could not locate the turn-refresh handler — fence cannot run');
   process.exit(1);

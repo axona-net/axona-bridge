@@ -60,7 +60,7 @@ export const DIRECTORY_NEVER_REGIONS = Object.freeze(['bridge']);  // the system
  * @param {(event:string, detail?:object)=>void} [o.log]
  * @returns {{ enabled:boolean, url:string|null, stop:()=>void }}
  */
-export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, book = null, authorStore = null, log = () => {} }) {
+export function startDirectoryPublisher({ peer, identity, version = '', env = process.env, book = null, authorStore = null, log = () => {}, allowRegion = null }) {
   const off = String(env.BRIDGE_DIRECTORY ?? 'on').toLowerCase() === 'off';
   if (off) {
     log('disabled', { reason: 'BRIDGE_DIRECTORY=off' });
@@ -185,6 +185,10 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
     const entry = makeEntry();
     for (const r of regions) {
       try {
+        // Bridge-Air-Gap-Plan D3: name the copy to the root allow-list BEFORE the
+        // kernel decides a role for it — an introduction-only manager refuses
+        // root for any topic it has not been told is a directory copy.
+        if (allowRegion) await allowRegion(r);
         // Ordinary open publish. Nothing is hosted; the topic roots wherever its
         // address lands in that region, like any other topic.
         await peer.pub(topicIn(r), entry, { signWith: author });
@@ -222,13 +226,16 @@ export function startDirectoryPublisher({ peer, identity, version = '', env = pr
       try {
         // Subscribe in every bridge region too, so we learn from all of them.
         const subs = [];
-        for (const r of bridgeRegions()) subs.push(await peer.sub(topicIn(r), (envp) => {
-          if (!envp || envp.deleted || !envp.signerPubkey) return;
-          if (envp.message?.url === url) return;          // skip our own entry
-          if (book.merge(envp.message, envp.signerPubkey)) {
-            log('learned', { url: envp.message?.url, known: book.count });
-          }
-        }, { since: 'all' }));
+        for (const r of bridgeRegions()) {
+          if (allowRegion) await allowRegion(r);           // D3, as in publish()
+          subs.push(await peer.sub(topicIn(r), (envp) => {
+            if (!envp || envp.deleted || !envp.signerPubkey) return;
+            if (envp.message?.url === url) return;          // skip our own entry
+            if (book.merge(envp.message, envp.signerPubkey)) {
+              log('learned', { url: envp.message?.url, known: book.count });
+            }
+          }, { since: 'all' }));
+        }
         sub = { stop() { for (const x of subs) { try { x?.stop?.(); } catch { /* dying */ } } } };
       } catch (err) { log('subscribe-failed', { err: err?.message }); }
     }

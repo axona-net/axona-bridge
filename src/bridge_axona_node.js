@@ -47,6 +47,9 @@ function clz64(x) {
 }
 
 import { CompositeTransport } from '@axona/protocol/transport/web/composite.js';
+import { deriveTopicIdBig } from '@axona/protocol/pubsub/post.js';
+import { BRIDGE_DIRECTORY_TOPIC } from '@axona/protocol';
+import { AirGap } from './air_gap.js';
 import { readDispatchCapability } from '@axona/protocol/registry/index.js';
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
@@ -65,10 +68,15 @@ export class BridgeAxonaNode {
    * @param {(connId: string) => boolean}              opts.isConnOpen
    * @param {(event:string, data?:object) => void}     [opts.log]
    */
-  constructor({ sendToConn, isConnOpen, closeConn = null, log }) {
+  constructor({ sendToConn, isConnOpen, closeConn = null, log, airGap = null }) {
     if (typeof sendToConn !== 'function' || typeof isConnOpen !== 'function') {
       throw new TypeError('BridgeAxonaNode: sendToConn + isConnOpen required');
     }
+    // Bridge-Air-Gap-Plan v0.3 §7.1.4: the named directory topic ids (lower-hex)
+    // this bridge may root. Live Set shared with the engine → AxonaManager and
+    // with the AirGap classifier; bridge_directory adds each copy it serves.
+    this._rootAllowList = new Set();
+    this._airGap = airGap instanceof AirGap ? airGap : new AirGap({ isDirectoryTopic: (hex) => this._rootAllowList.has(hex) });
     this._sendToConn = sendToConn;
     this._isConnOpen = isConnOpen;
     this._closeConn  = typeof closeConn === 'function' ? closeConn : () => {};
@@ -107,6 +115,24 @@ export class BridgeAxonaNode {
   // observability (kernel_log.js) and /diag stop reaching through two private
   // fields and guessing which one is set — the guess was already wrong once.
   get axon()      { return this._axon ?? this._peer?._axonaManager ?? null; }
+  get airGap()    { return this._airGap; }
+  get rootAllowList() { return this._rootAllowList; }
+
+  /**
+   * Admit a named directory topic id to the root allow-list (D3). Idempotent.
+   * @param {bigint|string} topicId
+   */
+  allowDirectoryTopic(topicId) {
+    const hex = typeof topicId === 'bigint' ? topicId.toString(16).padStart(66, '0')
+              : String(topicId).replace(/^0x/i, '').toLowerCase().padStart(66, '0');
+    if (!/^[0-9a-f]{66}$/.test(hex)) throw new TypeError('allowDirectoryTopic: 66-hex topic id required');
+    this._rootAllowList.add(hex);
+    return hex;
+  }
+  /** Resolve {region} to the directory topic id for that region and allow it. */
+  async allowDirectoryRegion(region) {
+    return this.allowDirectoryTopic(await deriveTopicIdBig({ region, name: BRIDGE_DIRECTORY_TOPIC }));
+  }
 
   /**
    * Bring the embedded peer up.  Synchronous-friendly: callers
@@ -130,7 +156,13 @@ export class BridgeAxonaNode {
       createdAt: this._identity.createdAt,
     });
 
-    this._engine = new BridgeEngine({ k: 20 });
+    this._engine = new BridgeEngine({ k: 20, rootAllowList: this._rootAllowList });
+    this._airGap.setSelfId(this._identity.id);
+    // The legacy system-region copy (0xFF): serve-only. This bridge never publishes
+    // into it (bridge_directory DIRECTORY_NEVER_REGIONS) but may still root it for
+    // the subscribers it has; it ages out with them (v0.5 §7.2.7).
+    try { this.allowDirectoryTopic(await deriveTopicIdBig({ region: 'bridge', name: BRIDGE_DIRECTORY_TOPIC })); }
+    catch (err) { this._log('legacy-directory-topic-unresolved', { err: err?.message }); }
 
     this._node = new NeuronNode({
       id:  this._identity.id,
@@ -148,12 +180,17 @@ export class BridgeAxonaNode {
       sendToConn:  this._sendToConn,
       isConnOpen:  this._isConnOpen,
       log: this._log,
+      airGap: this._airGap,
     });
 
     // `node.transport` is a CompositeTransport so the kernel's pub/sub + routing
     // handlers fan across BOTH the inbound server WS and an OUTBOUND bootstrap
     // uplink (added later by startUplink). One peer, one connectome.
-    this._composite = new CompositeTransport({ localNodeId: this._identity.id, log: this._log });
+    // introductionOnly (kernel 4.89.0): every connection this node holds — the
+    // server sockets AND the uplink's WebRTC edges — classifies 'introduction', so
+    // the kernel picks none of them as a hop or a role holder and the composite
+    // refuses any forward-class send with NO_TRANSPORT_ROUTE.
+    this._composite = new CompositeTransport({ localNodeId: this._identity.id, log: this._log, introductionOnly: true });
     this._composite.addSubtransport(this._transport);
     this._node.transport = this._composite;
     await this._composite.start(this._identity.id);
@@ -167,6 +204,7 @@ export class BridgeAxonaNode {
       engine:       this._engine,
       node:         this._node,
       nodeIdentity: this._identity,
+      introductionOnly: true,      // Bridge-Air-Gap-Plan v0.3 §7.1 (kernel 4.89.0)
       // synaptomeMaintain REVERTED to off (2026-06-29) — regressed Howard's suite.
     });
     await this._peer.start();
@@ -230,7 +268,7 @@ export class BridgeAxonaNode {
     try {
       const { buildUplink } = await import('./uplink.js');   // lazy: loads node-datachannel only now
       built = await buildUplink({
-        identity: this._identity, env, book, selfUrl,
+        identity: this._identity, env, book, selfUrl, airGap: this._airGap,
         log: (event, ctx) => this._log(`uplink:${event}`, ctx),
       });
     } catch (err) {
@@ -269,8 +307,8 @@ export class BridgeAxonaNode {
    * Called by server.js when an `{type:'axona', payload:...}` frame
    * arrives on a browser's WebSocket.
    */
-  handleAxonaFrame(connId, payload) {
-    this._transport.handleIncoming(connId, payload);
+  handleAxonaFrame(connId, payload, opts = undefined) {
+    return this._transport.handleIncoming(connId, payload, opts);
   }
 
   /**
@@ -507,17 +545,25 @@ export class BridgeAxonaNode {
     // kernel's registerFrame uses — which records the handler and fans it
     // onto every current AND later sub-transport (the uplink added after
     // startup inherits it, same as the sealed fan-out always did).
+    // Bridge-Air-Gap-Plan v0.4 §7.2.1: a route_msg reaches this handler only if
+    // the transport's ingress partition passed it (addressed to this bridge or a
+    // named directory topic it is terminal for; one of five inner verbs; named
+    // topic). The uplink's inbound route_msg does not pass through the server
+    // transport, so the same gate is applied HERE as well — the frame is then
+    // dispatched LOCALLY and never re-originated: routeMessage at an
+    // introduction-only node has no transit edge to pick, so it delivers to the
+    // local handler and returns the verdict. Anything else is the refusal verdict.
+    const airGap = this._airGap;
     readDispatchCapability(t).request('route_msg', async (_fromId, body) => {
-      const { type, payload, targetId, originId } = body ?? {};
+      const { type, payload, targetId, originId, hops } = body ?? {};
       if (!peer()) return { consumed: false, atNode: null, hops: 0, exhausted: true };
-      // Wire targetId is hex (v1.5 contract); peer.routeMessage requires a BIGINT. The
-      // kernel's own route_msg handler converts via asId — this bridge forwarder omitted it,
-      // so EVERY routed message the bridge tried to forward threw "targetId must be bigint"
-      // and was dropped. In a small fleet the bridge carries a real share of routed hops, so
-      // this was a systematic loss (David 2026-09-02). Convert exactly as bridge_engine does.
+      const why = airGap.routeMsgOutcome(body);
+      if (why) {
+        return { consumed: false, terminal: true, refused: true, hops: Number.isInteger(hops) ? hops : 0, error: 'transit-refused', outcome: why };
+      }
       const targetBig = typeof targetId === 'bigint'
         ? targetId
-        : (typeof targetId === 'string' ? BigInt('0x' + targetId.replace(/^0x/, '')) : targetId);
+        : BigInt('0x' + String(targetId).replace(/^0x/i, ''));
       return peer().routeMessage(targetBig, type, payload, { fromId: originId });
     });
   }
