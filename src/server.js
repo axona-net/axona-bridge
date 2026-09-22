@@ -528,6 +528,7 @@ function sendTo(peerId, msg, meta = undefined) {
   }
   try {
     conn.ws.send(JSON.stringify(msg, bigintReplacer));
+    bridgeNode.airGap.egressWritten('client', cls);
     return true;
   } catch (err) {
     logErr('send-failed', { connId: peerId, type: msg.type, err: err.message });
@@ -544,9 +545,11 @@ function broadcast(msg, exceptId = null) {
   for (const [id, conn] of connections) {
     if (id === exceptId)  continue;
     if (!conn.admitted)   continue;
-    if (!bridgeNode.airGap.egressWrite('client', msg).allowed) continue;   // §7.2.6, same gate as sendTo
+    const { cls, allowed } = bridgeNode.airGap.egressWrite('client', msg);   // §7.2.6, same gate as sendTo
+    if (!allowed) continue;
     try {
       conn.ws.send(JSON.stringify(msg, bigintReplacer));
+      bridgeNode.airGap.egressWritten('client', cls);
       count++;
     } catch (err) {
       logErr('broadcast-send-failed', { connId: id, type: msg.type, err: err.message });

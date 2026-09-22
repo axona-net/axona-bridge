@@ -146,8 +146,12 @@ console.log('\n[U6] egress classes');
   const w2 = g.egressWrite('uplink', { type: 'axona', payload: { k: 'req', id: 2, type: 'route_msg', body: { originId: OTHER, targetId: SELF, type: 'pubsub:sub', payload: { topicId: DIR } } } });
   const w3 = g.egressWrite('client', { type: 'pong' });
   ok('genericTransit is NOT allowed on either point, everything else is', !w1.allowed && !w2.allowed && w3.allowed);
-  ok('refused writes counted per point', g.egressRefused.client === 1 && g.egressRefused.uplink === 1 && g.egress.client.genericTransit === 1 && g.egress.uplink.genericTransit === 1);
-  ok('snapshot.forwardedGeneric reports attempts (never writes)', g.snapshot().forwardedGeneric === 2);
+  ok('refused ATTEMPTS counted per point', g.egressRefused.client === 1 && g.egressRefused.uplink === 1 && g.egress.client.attempts.genericTransit === 1 && g.egress.uplink.attempts.genericTransit === 1);
+  g.egressWritten('client', w3.cls);
+  ok('a WRITE is counted only after the physical send (pong: attempts 1, writes 1)', g.egress.client.attempts.controlReply === 1 && g.egress.client.writes.controlReply === 1);
+  ok('genericTransit: attempts 2, WRITES 0 — measured at the write site, not declared', g.snapshot().genericTransitAttempts === 2 && g.snapshot().forwardedGeneric === 0 && g.egress.client.writes.genericTransit === 0);
+  g.egressWritten('client', 'genericTransit');   // what a bypass would look like: the counter is live
+  ok('…and the writes counter is live: a write past the gate would show (test-only call)', g.snapshot().forwardedGeneric === 1);
   ok('every class name is in EGRESS_CLASSES', EGRESS_CLASSES.includes('genericTransit') && EGRESS_CLASSES.includes('controlBare') && EGRESS_CLASSES.includes('linkMaintenance') && EGRESS_CLASSES.length === 13);
 }
 

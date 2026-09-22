@@ -135,8 +135,18 @@ export class AirGap {
     this.ingressByType = {};
     for (const o of NEGATIVE) this.ingressByType[o] = zeroed(TYPE_KEYS);
     this.transport = { oversizeLocal: 0, close1009: 0 };
-    this.egress = { client: zeroed(EGRESS_CLASSES), uplink: zeroed(EGRESS_CLASSES) };
-    this.egressRefused = { client: 0, uplink: 0 };   // genericTransit writes NOT performed
+    // Per write point, per class: ATTEMPTS (classified before the gate) and WRITES
+    // (incremented after the physical send returned without throwing). The two are
+    // kept apart so a blocked attempt is evidence and a zero under `writes` is a
+    // measurement at the same site as every other class's writes, not a constant.
+    // Three write points (v0.8): the client socket, the uplink socket, and the
+    // uplink's WebRTC data channels (gated inside the kernel's mesh at dc.send).
+    this.egress = {
+      client:      { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
+      uplink:      { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
+      datachannel: { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
+    };
+    this.egressRefused = { client: 0, uplink: 0, datachannel: 0 };   // genericTransit attempts NOT written
     this.directory = { rootUnreachable: 0, staleRoot: 0, ownEntrySent: 0 };
 
     /** @type {Map<string, object>} connId → slot */
@@ -308,6 +318,15 @@ export class AirGap {
    * @param {object} [meta] { reqType, inReplyTo, republish }
    * @returns {string} one of EGRESS_CLASSES
    */
+  /** A data-channel frame is a bare {k,type,…} envelope or a {type:'ping'|'pong'} keepalive. */
+  classifyDataChannel(frame, meta = {}) {
+    if (!frame || typeof frame !== 'object') return 'genericTransit';
+    if (frame.k === 'req' || frame.k === 'res' || frame.k === 'ntf') return this.classifyEgress({ type: 'axona', payload: frame }, meta);
+    if (frame.type === 'ping') return 'linkMaintenance';
+    if (frame.type === 'pong') return 'controlReply';
+    return 'genericTransit';
+  }
+
   classifyEgress(msg, meta = {}) {
     if (!msg || typeof msg !== 'object') return 'genericTransit';
     if (msg.type !== 'axona') {
@@ -366,11 +385,16 @@ export class AirGap {
    * @param {'client'|'uplink'} point
    */
   egressWrite(point, msg, meta = {}) {
-    const cls = this.classifyEgress(msg, meta);
-    const table = this.egress[point] ?? this.egress.client;
-    table[cls]++;
-    if (cls === 'genericTransit') { this.egressRefused[point === 'uplink' ? 'uplink' : 'client']++; return { cls, allowed: false }; }
+    const cls = point === 'datachannel' ? this.classifyDataChannel(msg, meta) : this.classifyEgress(msg, meta);
+    const p = (point in this.egress) ? point : 'client';
+    this.egress[p].attempts[cls]++;
+    if (cls === 'genericTransit') { this.egressRefused[p]++; return { cls, allowed: false }; }
     return { cls, allowed: true };
+  }
+  /** The physical send returned: count the WRITE for its class at that point. */
+  egressWritten(point, cls) {
+    const p = (point in this.egress) ? point : 'client';
+    if (cls in this.egress[p].writes) this.egress[p].writes[cls]++;
   }
 
   // ── reporting ───────────────────────────────────────────────────────
@@ -378,8 +402,9 @@ export class AirGap {
     return {
       ingress: { ...this.ingress },
       transport: { ...this.transport },
-      egressClient: { ...this.egress.client },
-      egressUplink: { ...this.egress.uplink },
+      egressClientAttempts: { ...this.egress.client.attempts },
+      egressUplinkAttempts: { ...this.egress.uplink.attempts },
+      egressDcAttempts: { ...this.egress.datachannel.attempts },
       egressRefused: { ...this.egressRefused },
       directory: { ...this.directory },
     };
@@ -402,9 +427,16 @@ export class AirGap {
       ingress: { ...this.ingress, decoded, transitAttempted },
       ingressByType: byType,
       transport: { ...this.transport },
-      egress: { client: { ...this.egress.client }, uplink: { ...this.egress.uplink } },
+      egress: {
+        client:      { attempts: { ...this.egress.client.attempts }, writes: { ...this.egress.client.writes } },
+        uplink:      { attempts: { ...this.egress.uplink.attempts }, writes: { ...this.egress.uplink.writes } },
+        datachannel: { attempts: { ...this.egress.datachannel.attempts }, writes: { ...this.egress.datachannel.writes } },
+      },
       egressRefused: { ...this.egressRefused },
-      forwardedGeneric: this.egress.client.genericTransit + this.egress.uplink.genericTransit,   // attempts; none written
+      // v0.4 §7.2.2: forwardedGeneric is an EGRESS count held at zero — the WRITES,
+      // measured where every other write is. Attempts are reported beside it.
+      forwardedGeneric: this.egress.client.writes.genericTransit + this.egress.uplink.writes.genericTransit + this.egress.datachannel.writes.genericTransit,
+      genericTransitAttempts: this.egress.client.attempts.genericTransit + this.egress.uplink.attempts.genericTransit + this.egress.datachannel.attempts.genericTransit,
       directory: { ...this.directory },
     };
   }
@@ -428,8 +460,9 @@ export class AirGap {
       const d = cur.transport[k] - prev.transport[k];
       if (d) { delta[k] = d; any = true; }
     }
-    const gt = (cur.egressClient.genericTransit - prev.egressClient.genericTransit)
-             + (cur.egressUplink.genericTransit - prev.egressUplink.genericTransit);
+    const gt = (cur.egressClientAttempts.genericTransit - prev.egressClientAttempts.genericTransit)
+             + (cur.egressUplinkAttempts.genericTransit - prev.egressUplinkAttempts.genericTransit)
+             + (cur.egressDcAttempts.genericTransit - prev.egressDcAttempts.genericTransit);
     if (gt) { delta.genericTransitRefused = gt; any = true; }
     for (const k of ['rootUnreachable', 'staleRoot']) {
       const d = cur.directory[k] - prev.directory[k];

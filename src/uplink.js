@@ -76,17 +76,28 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     send(data, ...rest) {
       let msg = null;
       try { msg = typeof data === 'string' ? JSON.parse(data) : null; } catch { msg = null; }
-      const { allowed } = airGap.egressWrite('uplink', msg);
+      const { cls, allowed } = airGap.egressWrite('uplink', msg);
       if (!allowed) { log('egress-refused', { point: 'uplink', type: msg?.type, inner: msg?.payload?.type }); return; }
-      return super.send(data, ...rest);
+      const r = super.send(data, ...rest);
+      airGap.egressWritten('uplink', cls);
+      return r;
     }
   } : WebSocketImpl;
+  // Write point 3 (v0.8): the uplink's WebRTC data channels. The kernel's mesh
+  // calls this gate at dc.send — the physical write — so a data-channel frame is
+  // classified and counted where it leaves, and a genericTransit frame is refused
+  // there, below the composite gate.
+  const egressGate = airGap ? {
+    before: (frame) => airGap.egressWrite('datachannel', frame),
+    after:  (cls)   => airGap.egressWritten('datachannel', cls),
+  } : null;
   const transport = webTransport({
     bridgeUrl: upstream,
     identity:  uplinkIdentity,
     meshRelay: true,        // integrate fully (help relay signaling like a relay)
     reconnect: true,        // self-heal the uplink to this upstream
     WebSocketImpl: UplinkSocket,
+    egressGate,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });
 

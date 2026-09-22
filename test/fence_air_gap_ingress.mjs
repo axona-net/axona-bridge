@@ -22,11 +22,14 @@
 //   D. the partition sums to what the decoder saw; genericTransit egress = 0;
 //      welcome/hello/pong/refusal replies classified on the client point.
 //   E. pre-admission: a req before client-hello gets no reply (bound zero).
+//   F. two authenticated clients A and B (NH1 complete, both in the synaptome):
+//      A's route_msg / direct_* / __tunneled_direct__ addressed to B → refusal
+//      verdict to A, NOTHING at B, zero genericTransit attempts and writes.
 // Author tests are not acceptance (Vega's challenge + Aster CP review follow).
 // =====================================================================
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
-import { KERNEL_VERSION, WIRE_VERSION } from '@axona/protocol';
+import { KERNEL_VERSION, WIRE_VERSION, createNodeIdentity, buildAuthHello, cbvFromNonces } from '@axona/protocol';
 import { MAX_PAYLOAD_BYTES } from '../src/air_gap.js';
 
 const PORT = 8141;
@@ -174,8 +177,11 @@ async function main() {
     const ig = h.airGap.ingress;
     const sum = Object.entries(ig).filter(([k]) => k !== 'decoded' && k !== 'transitAttempted').reduce((n, [, v]) => n + v, 0);
     check('buckets sum to messages delivered to the decoder', sum === ig.decoded, `${sum} vs ${ig.decoded}`);
-    const eg = h.airGap.egress.client;
-    check('genericTransit = 0 on both write points, egressRefused 0', eg.genericTransit === 0 && h.airGap.egress.uplink.genericTransit === 0 && h.airGap.egressRefused.client === 0);
+    const eg = h.airGap.egress.client.writes;
+    const at = h.airGap.egress.client.attempts;
+    check('genericTransit WRITES = 0 and ATTEMPTS = 0 on both points (nothing tried to leave carrying another node\'s frame)',
+      eg.genericTransit === 0 && at.genericTransit === 0 && h.airGap.egress.uplink.writes.genericTransit === 0 && h.airGap.egress.uplink.attempts.genericTransit === 0 && h.airGap.egressRefused.client === 0);
+    check('every class: writes ≤ attempts, and equal here (no send threw)', Object.keys(eg).every((k) => eg[k] <= at[k]) && Object.keys(eg).every((k) => eg[k] === at[k]), JSON.stringify({ at, eg }));
     check('controlBare ≥ 3 sockets × (version-gate + welcome + peer-list)', eg.controlBare >= 9, String(eg.controlBare));
     check('hello ≥ 3 (one NH1 hello from the bridge per admitted socket)', eg.hello >= 3, String(eg.hello));
     check('refusalReply = 3 (11, 12, 13)', eg.refusalReply === 3, String(eg.refusalReply));
@@ -194,6 +200,44 @@ async function main() {
     const h = await healthz();
     check('…and is counted refusedRate (bound is zero before admission)', h.airGap.ingressByType.refusedRate?.lookahead_probe === 1, JSON.stringify(h.airGap.ingressByType.refusedRate));
     try { w.close(1000); } catch {}
+  }
+
+  // ── F. two AUTHENTICATED clients: a received frame addressed to another ──
+  //      directly connected client (Aster 66db253a) over write point 1
+  console.log('[F] a received client frame addressed to ANOTHER directly connected client');
+  {
+    // Complete the NH1 handshake so both are bound in the bridge's synaptome:
+    // welcome → bridge hello (ntf) → our authenticated hello-ack.
+    async function authed() {
+      const { ws: w, st: s } = await connect();
+      await until(() => s.welcomed);
+      const welcome = s.frames.find((m) => m.type === 'welcome');
+      await until(() => s.frames.some((m) => m.type === 'axona' && m.payload?.type === 'hello'));
+      const me = await createNodeIdentity({ lat: 38.0, lng: -77.0 });
+      const cbv = cbvFromNonces(welcome.serverNonce, welcome.connId, 'bridge');
+      const ack = await buildAuthHello({ identity: me, cbv });
+      w.send(axona({ k: 'ntf', type: 'hello-ack', body: ack }));
+      return { ws: w, st: s, idHex: me.id };
+    }
+    const A = await authed();
+    const B = await authed();
+    await sleep(200);
+    const h0 = await healthz();
+    check('both clients are bound in the bridge synaptome (the addressee IS directly connected)', h0.axona.synaptomeSize >= 2, String(h0.axona.synaptomeSize));
+    const bFramesBefore = B.st.frames.length;
+    const dirTopic = '89'.padEnd(66, '1');
+    A.ws.send(axona({ k: 'req', id: 31, type: 'route_msg', body: { type: 'pubsub:sub', payload: { topicId: dirTopic, subscriberId: A.idHex }, targetId: B.idHex, hops: 0, originId: A.idHex } }));
+    const v = await until(() => resFor(A.st, 31)) && resFor(A.st, 31).payload.body;
+    check('A → route_msg addressed to B: A gets the refusal verdict (refusedTransit)', v && v.refused === true && v.outcome === 'refusedTransit', JSON.stringify(v));
+    A.ws.send(axona({ k: 'ntf', type: 'direct_pubsub:deliver', body: { topicId: dirTopic, targetId: B.idHex } }));
+    A.ws.send(axona({ k: 'req', id: 32, type: '__tunneled_direct__', body: { targetId: B.idHex, innerType: 'pubsub:deliver', innerPayload: {} } }));
+    await until(() => resFor(A.st, 32));
+    await sleep(300);
+    check('B received NOTHING from A across the bridge (no req, no ntf, no tunnelled frame)', B.st.frames.length === bFramesBefore, `${B.st.frames.length - bFramesBefore} frames`);
+    const h = await healthz();
+    check('genericTransit attempts AND writes still 0 on every point', h.airGap.genericTransitAttempts === 0 && h.airGap.forwardedGeneric === 0, JSON.stringify({ a: h.airGap.genericTransitAttempts, w: h.airGap.forwardedGeneric }));
+    check('the data-channel point is reported (attempts/writes, zero without an uplink)', h.airGap.egress.datachannel && h.airGap.egress.datachannel.writes.genericTransit === 0);
+    try { A.ws.close(1000); B.ws.close(1000); } catch {}
   }
 
   check('no egress-refused log row (the invariant held during the run)', !lines.some((l) => l.includes('"event":"egress-refused"')));
