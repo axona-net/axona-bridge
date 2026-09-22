@@ -11,8 +11,8 @@
 //   U4  bounds: a listed type over its bucket is refusedRate (req) or
 //       droppedRate (ntf/bare); pre-admission bound is zero except client-hello;
 //   U5  slots: past the tracked cap a connection shares the overflow slot; hits counted per frame;
-//   U6  egress classes: every row of the §7.2.6 table plus the two additions,
-//       genericTransit is refused (allowed:false) and counted;
+//   U6  egress classes: shape AND trusted local cause AND point; one allowed and one
+//       forbidden case per class; genericTransit refused; invoked/returned/threw/asyncFailed;
 //   U7  transport labels stay OUTSIDE the partition;
 //   U8  drainLog: deltas only, null when quiet, positives never logged.
 // Author tests are not acceptance (Vega's challenge + Aster CP review follow).
@@ -116,42 +116,65 @@ console.log('\n[U5] tracked slots + overflow');
   ok('TRACKED_SLOTS default is 256, MAX_PAYLOAD_BYTES is 16 KiB (D5)', TRACKED_SLOTS === 256 && MAX_PAYLOAD_BYTES === 16384);
 }
 
-console.log('\n[U6] egress classes');
+console.log('\n[U6] egress classes: shape AND trusted local cause AND point (v0.9); one allowed and one forbidden case per class');
 {
   const g = mk();
-  const cls = (msg, meta) => g.classifyEgress(msg, meta);
-  ok('version-gate/welcome/peer-joined/peer-left → controlBare', ['version-gate', 'welcome', 'peer-joined', 'peer-left'].every((type) => cls({ type }) === 'controlBare'));
-  ok('pong → controlReply', cls({ type: 'pong' }) === 'controlReply');
-  ok('peer-list on admission → controlBare; in reply → controlReply', cls({ type: 'peer-list' }) === 'controlBare' && cls({ type: 'peer-list' }, { inReplyTo: 'peer-list-request' }) === 'controlReply');
-  ok('signal → signalRelay', cls({ type: 'signal', to: 'x', payload: {} }) === 'signalRelay');
-  ok('ntf hello → hello', cls({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: {} } }) === 'hello');
-  ok('ntf reinforce → linkMaintenance', cls({ type: 'axona', payload: { k: 'ntf', type: 'reinforce', body: {} } }) === 'linkMaintenance');
-  ok('res to lookahead_probe → discoveryReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: {} } }, { reqType: 'lookahead_probe' }) === 'discoveryReply');
-  ok('res carrying transit-refused → refusalReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: false, body: { error: 'transit-refused' } } }, { reqType: 'route_msg' }) === 'refusalReply');
-  ok('res verdict refused:true → refusalReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: { refused: true } } }, { reqType: 'route_msg' }) === 'refusalReply');
-  ok('res to a dispatched route_msg → controlReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: { consumed: true } } }, { reqType: 'route_msg' }) === 'controlReply');
-  ok('own-origin route_msg PUB to a directory topic → directoryOwnEntry', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: SELF, targetId: OTHER, type: 'pubsub:pub', payload: { topicId: DIR } } } }) === 'directoryOwnEntry');
-  ok('same, republish meta → directoryRepublish', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: SELF, targetId: OTHER, type: 'pubsub:pub', payload: { topicId: DIR } } } }, { republish: true }) === 'directoryRepublish');
-  ok('own-origin route_msg DELIVER for a directory topic → directoryServe', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: SELF, targetId: OTHER, type: 'pubsub:deliver', payload: { topicId: DIR } } } }) === 'directoryServe');
-  ok('direct_pubsub:deliver ntf for a directory topic → directoryServe', cls({ type: 'axona', payload: { k: 'ntf', type: 'direct_pubsub:deliver', body: { topicId: DIR } } }) === 'directoryServe');
-  ok('direct_pubsub:deliver ntf for another topic → genericTransit', cls({ type: 'axona', payload: { k: 'ntf', type: 'direct_pubsub:deliver', body: { topicId: OTHER } } }) === 'genericTransit');
-  ok('route_msg with a FOREIGN originId → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: OTHER, targetId: SELF, type: 'pubsub:sub', payload: { topicId: DIR } } } }) === 'genericTransit');
-  ok('own-origin route_msg PUB to a NON-directory topic → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: SELF, targetId: OTHER, type: 'pubsub:pub', payload: { topicId: OTHER } } } }) === 'genericTransit');
-  ok('__tunneled_direct__ → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: '__tunneled_direct__', body: {} } }) === 'genericTransit');
-  ok('lookup_step req → discoveryRequest', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'lookup_step', body: {} } }) === 'discoveryRequest');
-  ok('directory:sync req → directorySync', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'directory:sync', body: {} } }) === 'directorySync');
-  ok('uplink-side client frames → controlBare', ['client-hello', 'ping', 'peer-list-request', 'turn-refresh'].every((type) => cls({ type }) === 'controlBare'));
-  ok('unknown bare type → genericTransit', cls({ type: 'whatever' }) === 'genericTransit');
-  const w1 = g.egressWrite('client', { type: 'axona', payload: { k: 'req', id: 1, type: '__tunneled_direct__', body: {} } });
-  const w2 = g.egressWrite('uplink', { type: 'axona', payload: { k: 'req', id: 2, type: 'route_msg', body: { originId: OTHER, targetId: SELF, type: 'pubsub:sub', payload: { topicId: DIR } } } });
-  const w3 = g.egressWrite('client', { type: 'pong' });
+  const cls = (msg, meta, point) => g.classifyEgress(msg, meta, point);
+  const own = (inner, topic = DIR, extra = {}) => ({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: SELF, targetId: OTHER, type: inner, payload: { topicId: topic }, ...extra } } });
+  // controlBare: the closed list, each with its emitting transition
+  ok('version-gate + connect → controlBare; without the cause → genericTransit', cls({ type: 'version-gate' }, { cause: 'connect' }) === 'controlBare' && cls({ type: 'version-gate' }) === 'genericTransit');
+  ok('welcome / peer-list / turn + admission → controlBare', ['welcome', 'peer-list', 'turn'].every((type) => cls({ type }, { cause: 'admission' }) === 'controlBare'));
+  ok('peer-list with NO cause → genericTransit (a received peer-list relabelled as admission)', cls({ type: 'peer-list' }) === 'genericTransit' && cls({ type: 'peer-list' }, { cause: 'kernel-notify' }) === 'genericTransit');
+  ok('peer-joined + admission → controlBare; peer-joined + close → genericTransit', cls({ type: 'peer-joined' }, { cause: 'admission' }) === 'controlBare' && cls({ type: 'peer-joined' }, { cause: 'close' }) === 'genericTransit');
+  ok('peer-left + close → controlBare; peer-left + admission → genericTransit', cls({ type: 'peer-left' }, { cause: 'close' }) === 'controlBare' && cls({ type: 'peer-left' }, { cause: 'admission' }) === 'genericTransit');
+  ok('upstream-only bare frames at the UPLINK point with the socket cause → controlBare', ['client-hello', 'ping', 'peer-list-request', 'turn-refresh'].every((type) => cls({ type }, { cause: 'uplink-socket' }, 'uplink') === 'controlBare'));
+  ok('the SAME frames toward a CLIENT → genericTransit (wrong destination)', ['client-hello', 'ping', 'peer-list-request', 'turn-refresh'].every((type) => cls({ type }, { cause: 'admission' }, 'client') === 'genericTransit'));
+  ok('at the uplink point without the socket cause → genericTransit', cls({ type: 'ping' }, {}, 'uplink') === 'genericTransit');
+  // controlReply
+  ok('pong + reply → controlReply; pong without the cause → genericTransit', cls({ type: 'pong' }, { cause: 'reply' }) === 'controlReply' && cls({ type: 'pong' }) === 'genericTransit');
+  ok('peer-list + reply + inReplyTo → controlReply', cls({ type: 'peer-list' }, { cause: 'reply', inReplyTo: 'peer-list-request' }) === 'controlReply');
+  // signalRelay
+  ok('signal + signal-relay → signalRelay; signal with no cause → genericTransit', cls({ type: 'signal', to: 'x', payload: {} }, { cause: 'signal-relay' }) === 'signalRelay' && cls({ type: 'signal', to: 'x', payload: {} }) === 'genericTransit');
+  // hello
+  ok('ntf hello + admission → hello; ntf hello + kernel-notify → genericTransit (only the admission emits it)', cls({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: {} } }, { cause: 'admission' }) === 'hello' && cls({ type: 'axona', payload: { k: 'ntf', type: 'hello', body: {} } }, { cause: 'kernel-notify' }) === 'genericTransit');
+  // linkMaintenance: kernel-originated only
+  ok('ntf reinforce + kernel-notify → linkMaintenance', cls({ type: 'axona', payload: { k: 'ntf', type: 'reinforce', body: {} } }, { cause: 'kernel-notify' }) === 'linkMaintenance');
+  ok('the SAME reinforce with no cause → genericTransit (a received frame cannot be relabelled as maintenance)', cls({ type: 'axona', payload: { k: 'ntf', type: 'reinforce', body: {} } }) === 'genericTransit');
+  ok('presence + admission (wrong transition) → genericTransit', cls({ type: 'axona', payload: { k: 'ntf', type: 'presence', body: {} } }, { cause: 'admission' }) === 'genericTransit');
+  ok('req ping + kernel-request → linkMaintenance; + reply → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'ping', body: {} } }, { cause: 'kernel-request' }) === 'linkMaintenance' && cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'ping', body: {} } }, { cause: 'reply' }) === 'genericTransit');
+  // replies
+  ok('res + kernel-reply + reqType lookahead_probe → discoveryReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: {} } }, { cause: 'kernel-reply', reqType: 'lookahead_probe' }) === 'discoveryReply');
+  ok('res with no cause → genericTransit (a res the bridge did not produce)', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: {} } }, { reqType: 'lookahead_probe' }) === 'genericTransit');
+  ok('res carrying transit-refused + kernel-reply → refusalReply; verdict refused:true too', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: false, body: { error: 'transit-refused' } } }, { cause: 'kernel-reply', reqType: 'route_msg' }) === 'refusalReply' && cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: { refused: true } } }, { cause: 'kernel-reply', reqType: 'route_msg' }) === 'refusalReply');
+  ok('res to a dispatched route_msg + kernel-reply → controlReply', cls({ type: 'axona', payload: { k: 'res', id: 1, ok: true, body: { consumed: true } } }, { cause: 'kernel-reply', reqType: 'route_msg' }) === 'controlReply');
+  // directory: own origin AND the kernel's own send
+  ok('own-origin PUB to a directory topic + kernel-request → directoryOwnEntry', cls(own('pubsub:pub'), { cause: 'kernel-request' }) === 'directoryOwnEntry');
+  ok('the SAME frame with no cause → genericTransit (originId is a frame-supplied claim)', cls(own('pubsub:pub')) === 'genericTransit');
+  ok('own-origin PUB + kernel-request + republish → directoryRepublish', cls(own('pubsub:pub'), { cause: 'kernel-request', republish: true }) === 'directoryRepublish');
+  ok('own-origin DELIVER for a directory topic + kernel-request → directoryServe', cls(own('pubsub:deliver'), { cause: 'kernel-request' }) === 'directoryServe');
+  ok('direct_pubsub:deliver ntf for a directory topic + kernel-notify → directoryServe; for another topic → genericTransit', cls({ type: 'axona', payload: { k: 'ntf', type: 'direct_pubsub:deliver', body: { topicId: DIR } } }, { cause: 'kernel-notify' }) === 'directoryServe' && cls({ type: 'axona', payload: { k: 'ntf', type: 'direct_pubsub:deliver', body: { topicId: OTHER } } }, { cause: 'kernel-notify' }) === 'genericTransit');
+  ok('route_msg with a FOREIGN originId + kernel-request → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'route_msg', body: { originId: OTHER, targetId: SELF, type: 'pubsub:sub', payload: { topicId: DIR } } } }, { cause: 'kernel-request' }) === 'genericTransit');
+  ok('own-origin PUB to a NON-directory topic → genericTransit', cls(own('pubsub:pub', OTHER), { cause: 'kernel-request' }) === 'genericTransit');
+  ok('__tunneled_direct__ + kernel-request → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: '__tunneled_direct__', body: {} } }, { cause: 'kernel-request' }) === 'genericTransit');
+  ok('lookup_step req + kernel-request → discoveryRequest; without cause → genericTransit', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'lookup_step', body: {} } }, { cause: 'kernel-request' }) === 'discoveryRequest' && cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'lookup_step', body: {} } }) === 'genericTransit');
+  ok('directory:sync req + kernel-request → directorySync', cls({ type: 'axona', payload: { k: 'req', id: 1, type: 'directory:sync', body: {} } }, { cause: 'kernel-request' }) === 'directorySync');
+  ok('unknown bare type → genericTransit whatever the cause', cls({ type: 'whatever' }, { cause: 'admission' }) === 'genericTransit');
+  // data channel: keepalive cause for bare ping/pong, kernel causes for envelopes
+  ok('data channel: bare ping + keepalive → linkMaintenance; bare pong + keepalive → controlReply; ping without keepalive → genericTransit', g.classifyDataChannel({ type: 'ping' }, { cause: 'keepalive' }) === 'linkMaintenance' && g.classifyDataChannel({ type: 'pong' }, { cause: 'keepalive' }) === 'controlReply' && g.classifyDataChannel({ type: 'ping' }, {}) === 'genericTransit');
+  ok('data channel: {k:ntf,type:reinforce} + kernel-notify → linkMaintenance; without cause → genericTransit', g.classifyDataChannel({ k: 'ntf', type: 'reinforce', body: {} }, { cause: 'kernel-notify' }) === 'linkMaintenance' && g.classifyDataChannel({ k: 'ntf', type: 'reinforce', body: {} }, {}) === 'genericTransit');
+  // send-call observations
+  const w1 = g.egressWrite('client', { type: 'axona', payload: { k: 'req', id: 1, type: '__tunneled_direct__', body: {} } }, { cause: 'kernel-request' });
+  const w2 = g.egressWrite('uplink', { type: 'axona', payload: { k: 'req', id: 2, type: 'route_msg', body: { originId: OTHER, targetId: SELF, type: 'pubsub:sub', payload: { topicId: DIR } } } }, { cause: 'uplink-socket' });
+  const w3 = g.egressWrite('client', { type: 'pong' }, { cause: 'reply' });
   ok('genericTransit is NOT allowed on either point, everything else is', !w1.allowed && !w2.allowed && w3.allowed);
   ok('refused ATTEMPTS counted per point', g.egressRefused.client === 1 && g.egressRefused.uplink === 1 && g.egress.client.attempts.genericTransit === 1 && g.egress.uplink.attempts.genericTransit === 1);
-  g.egressWritten('client', w3.cls);
-  ok('a WRITE is counted only after the physical send (pong: attempts 1, writes 1)', g.egress.client.attempts.controlReply === 1 && g.egress.client.writes.controlReply === 1);
-  ok('genericTransit: attempts 2, WRITES 0 — measured at the write site, not declared', g.snapshot().genericTransitAttempts === 2 && g.snapshot().forwardedGeneric === 0 && g.egress.client.writes.genericTransit === 0);
-  g.egressWritten('client', 'genericTransit');   // what a bypass would look like: the counter is live
-  ok('…and the writes counter is live: a write past the gate would show (test-only call)', g.snapshot().forwardedGeneric === 1);
+  g.egressInvoked('client', w3.cls); g.egressWritten('client', w3.cls);
+  ok('pong: attempts 1, invoked 1, returned 1, threw 0', g.egress.client.attempts.controlReply === 1 && g.egress.client.invoked.controlReply === 1 && g.egress.client.returned.controlReply === 1 && g.egress.client.threw.controlReply === 0);
+  g.egressInvoked('client', w3.cls); g.egressThrew('client', w3.cls); g.egressAsyncFailed('client', w3.cls);
+  ok('a throwing or later-failing send is invoked but not returned', g.egress.client.invoked.controlReply === 2 && g.egress.client.returned.controlReply === 1 && g.egress.client.threw.controlReply === 1 && g.egress.client.asyncFailed.controlReply === 1);
+  ok('genericTransit: attempts 2, INVOKED 0 — measured at the invocation site, not declared', g.snapshot().genericTransitAttempts === 2 && g.snapshot().forwardedGeneric === 0);
+  g.egressInvoked('client', 'genericTransit');   // what a bypass would look like: the counter is live
+  ok('…and the invoked counter is live: a forbidden invocation would show (test-only call)', g.snapshot().forwardedGeneric === 1 && g.drainLog()?.genericTransitINVOKED === 1);
   ok('every class name is in EGRESS_CLASSES', EGRESS_CLASSES.includes('genericTransit') && EGRESS_CLASSES.includes('controlBare') && EGRESS_CLASSES.includes('linkMaintenance') && EGRESS_CLASSES.length === 13);
 }
 
@@ -171,7 +194,7 @@ console.log('\n[U8] drainLog');
   ok('positives alone → still null', g.drainLog() === null);
   g.axona('c1', { k: 'req', id: 1, type: 'nope', body: {} }, A);
   g.oversizeLocal('c1');
-  g.egressWrite('client', { type: 'whatever' });
+  g.egressWrite('client', { type: 'whatever' }, { cause: 'admission' });
   const d = g.drainLog();
   ok('deltas: refusedUnlisted 1, oversizeLocal 1, genericTransitRefused 1', d && d.refusedUnlisted === 1 && d.oversizeLocal === 1 && d.genericTransitRefused === 1, JSON.stringify(d));
   ok('drained → null again', g.drainLog() === null);

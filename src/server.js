@@ -521,16 +521,21 @@ function bigintReviver(_key, value) {
 function sendTo(peerId, msg, meta = undefined) {
   const conn = connections.get(peerId);
   if (!conn) return false;
-  const { cls, allowed } = bridgeNode.airGap.egressWrite('client', msg, meta);
+  const ag = bridgeNode.airGap;
+  const { cls, allowed } = ag.egressWrite('client', msg, meta);
   if (!allowed) {
-    logErr('egress-refused', { connId: peerId, cls, type: msg?.type, inner: msg?.payload?.type });
+    logErr('egress-refused', { connId: peerId, cls, type: msg?.type, inner: msg?.payload?.type, cause: meta?.cause ?? null });
     return false;
   }
+  ag.egressInvoked('client', cls);
   try {
-    conn.ws.send(JSON.stringify(msg, bigintReplacer));
-    bridgeNode.airGap.egressWritten('client', cls);
+    // ws reports a LATER failure through the callback; the synchronous return
+    // says only that the call did not throw (v0.9: a send-call observation).
+    conn.ws.send(JSON.stringify(msg, bigintReplacer), (err) => { if (err) ag.egressAsyncFailed('client', cls); });
+    ag.egressWritten('client', cls);
     return true;
   } catch (err) {
+    ag.egressThrew('client', cls);
     logErr('send-failed', { connId: peerId, type: msg.type, err: err.message });
     return false;
   }
@@ -540,18 +545,21 @@ function sendTo(peerId, msg, meta = undefined) {
  *  Skips connections that haven't completed the client-hello version
  *  check — they should never appear in peer-list or get peer-joined
  *  notifications. */
-function broadcast(msg, exceptId = null) {
+function broadcast(msg, exceptId = null, meta = undefined) {
   let count = 0;
   for (const [id, conn] of connections) {
     if (id === exceptId)  continue;
     if (!conn.admitted)   continue;
-    const { cls, allowed } = bridgeNode.airGap.egressWrite('client', msg);   // §7.2.6, same gate as sendTo
+    const ag = bridgeNode.airGap;
+    const { cls, allowed } = ag.egressWrite('client', msg, meta);   // §7.2.6, same gate as sendTo
     if (!allowed) continue;
+    ag.egressInvoked('client', cls);
     try {
-      conn.ws.send(JSON.stringify(msg, bigintReplacer));
-      bridgeNode.airGap.egressWritten('client', cls);
+      conn.ws.send(JSON.stringify(msg, bigintReplacer), (err) => { if (err) ag.egressAsyncFailed('client', cls); });
+      ag.egressWritten('client', cls);
       count++;
     } catch (err) {
+      ag.egressThrew('client', cls);
       logErr('broadcast-send-failed', { connId: id, type: msg.type, err: err.message });
     }
   }
@@ -1101,7 +1109,7 @@ wss.on('connection', (ws, req) => {
     type:           'version-gate',
     minPeerVersion: MIN_PEER_VERSION,
     serverT:        Date.now(),
-  });
+  }, { cause: 'connect' });
 
   const onHelloTimeout = () => {
     if (conn.admitted) return;
@@ -1150,7 +1158,7 @@ wss.on('connection', (ws, req) => {
       kernelVersion: KERNEL_VERSION,
       serverNonce,
       turn,
-    });
+    }, { cause: 'admission' });
 
     // 2. Introduce the newcomer to a BOUNDED, curated anchor set (W2 nursery)
     //    rather than the full admitted list — it self-expands via the mesh.
@@ -1194,12 +1202,13 @@ wss.on('connection', (ws, req) => {
       ...admittedPeers.filter((p) => typeof p === 'string' && p.slice(0, 2) === newcomerRegion),
       ...admittedPeers.filter((p) => !(typeof p === 'string' && p.slice(0, 2) === newcomerRegion)),
     ];
-    sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+    sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() }, { cause: 'admission' });
 
     // 3. Tell existing admitted peers that someone new arrived.
     const announcedTo = broadcast(
       { type: 'peer-joined', peerId: id, serverT: Date.now() },
       id,
+      { cause: 'admission' },
     );
     log('peer-announce', { connId: id, peers: admittedPeers.length, announcedTo });
 
@@ -1355,7 +1364,7 @@ wss.on('connection', (ws, req) => {
           if (!otherConn.admitted) continue;
           admittedPeers.push(otherId);
         }
-        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() }, { inReplyTo: 'peer-list-request' });
+        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() }, { cause: 'reply', inReplyTo: 'peer-list-request' });
         log('peer-list-rerequest', { connId: id, peers: admittedPeers.length });
         break;
       }
@@ -1374,7 +1383,7 @@ wss.on('connection', (ws, req) => {
           type:    'pong',
           t:       msg.t,                // echo client timestamp unchanged
           serverT: Date.now(),
-        }, { inReplyTo: 'ping' })) {
+        }, { cause: 'reply', inReplyTo: 'ping' })) {
           conn.pongs++;
           logDebug('pong', { connId: id, n: conn.pings });
         } else {
@@ -1391,7 +1400,7 @@ wss.on('connection', (ws, req) => {
         // credential and return it in a `turn` frame. Admitted peers only.
         if (!conn.admitted) break;
         const turn = makeTurnCredential(id);
-        if (turn) sendTo(id, { type: 'turn', turn, serverT: Date.now() }, { inReplyTo: 'turn-refresh' });
+        if (turn) sendTo(id, { type: 'turn', turn, serverT: Date.now() }, { cause: 'reply', inReplyTo: 'turn-refresh' });
         logDebug('turn-refresh', { connId: id, minted: !!turn });
         break;
       }
@@ -1419,7 +1428,7 @@ wss.on('connection', (ws, req) => {
           type:    'signal',
           from:    id,
           payload: msg.payload,
-        });
+        }, { cause: 'signal-relay' });
         if (delivered) {
           airGap.signalRelayed(id);
           conn.signalsRelayed++;
@@ -1472,6 +1481,7 @@ wss.on('connection', (ws, req) => {
     const notifiedCount = broadcast(
       { type: 'peer-left', peerId: id, nodeId: departedNodeId ?? undefined, serverT: Date.now() },
       null,   // peer is already removed from the registry
+      { cause: 'close' },
     );
 
     bridgeNode.airGap.releaseSlot(id);

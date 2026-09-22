@@ -175,7 +175,7 @@ export class WebSocketTransport extends Transport {
       this._pending.set(id, { nodeId, resolve, reject, timer });
 
       try {
-        this._sendToConn(connId, { type: 'axona', payload: { k: 'req', id, type, body } });
+        this._sendToConn(connId, { type: 'axona', payload: { k: 'req', id, type, body } }, { cause: 'kernel-request' });
       } catch (err) {
         clearTimeout(timer);
         this._pending.delete(id);
@@ -196,7 +196,7 @@ export class WebSocketTransport extends Transport {
       return;
     }
     try {
-      this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type, body } });
+      this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type, body } }, { cause: 'kernel-notify' });
     } catch (err) {
       this._log('notify-failed', { nodeId: nodeId.toString(16), type, err: err.message });
     }
@@ -274,7 +274,7 @@ export class WebSocketTransport extends Transport {
    *  (v0.5 §7.2.6) can tell a discoveryReply from a controlReply. */
   _reply(connId, id, ok, body, reqType = null) {
     try {
-      this._sendToConn(connId, { type: 'axona', payload: { k: 'res', id, ok, body } }, { reqType });
+      this._sendToConn(connId, { type: 'axona', payload: { k: 'res', id, ok, body } }, { cause: 'kernel-reply', reqType });
     } catch (err) {
       this._log('reply-failed', { connId, id, err: err.message });
     }

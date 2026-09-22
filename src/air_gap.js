@@ -114,6 +114,7 @@ export function topicOf(body) {
 }
 
 function zeroed(keys) { const o = {}; for (const k of keys) o[k] = 0; return o; }
+const copyPoint = (p) => ({ attempts: { ...p.attempts }, invoked: { ...p.invoked }, returned: { ...p.returned }, threw: { ...p.threw }, asyncFailed: { ...p.asyncFailed } });
 
 export class AirGap {
   /**
@@ -141,12 +142,16 @@ export class AirGap {
     // measurement at the same site as every other class's writes, not a constant.
     // Three write points (v0.8): the client socket, the uplink socket, and the
     // uplink's WebRTC data channels (gated inside the kernel's mesh at dc.send).
-    this.egress = {
-      client:      { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
-      uplink:      { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
-      datachannel: { attempts: zeroed(EGRESS_CLASSES), writes: zeroed(EGRESS_CLASSES) },
-    };
-    this.egressRefused = { client: 0, uplink: 0, datachannel: 0 };   // genericTransit attempts NOT written
+    // Per point, per class, send-call OBSERVATIONS (v0.9, Aster 23f031a3):
+    //   attempts    classified, before the gate
+    //   invoked     the physical send was CALLED (a forbidden invocation is the
+    //               enforcement failure, whatever the send did afterwards)
+    //   returned    the call returned without a synchronous throw — NOT delivery
+    //   threw       the call threw synchronously
+    //   asyncFailed the API reported a later failure (ws send callback)
+    const pt = () => ({ attempts: zeroed(EGRESS_CLASSES), invoked: zeroed(EGRESS_CLASSES), returned: zeroed(EGRESS_CLASSES), threw: zeroed(EGRESS_CLASSES), asyncFailed: zeroed(EGRESS_CLASSES) });
+    this.egress = { client: pt(), uplink: pt(), datachannel: pt() };
+    this.egressRefused = { client: 0, uplink: 0, datachannel: 0 };   // genericTransit attempts NOT invoked
     this.directory = { rootUnreachable: 0, staleRoot: 0, ownEntrySent: 0 };
 
     /** @type {Map<string, object>} connId → slot */
@@ -321,29 +326,55 @@ export class AirGap {
   /** A data-channel frame is a bare {k,type,…} envelope or a {type:'ping'|'pong'} keepalive. */
   classifyDataChannel(frame, meta = {}) {
     if (!frame || typeof frame !== 'object') return 'genericTransit';
-    if (frame.k === 'req' || frame.k === 'res' || frame.k === 'ntf') return this.classifyEgress({ type: 'axona', payload: frame }, meta);
+    if (frame.k === 'req' || frame.k === 'res' || frame.k === 'ntf') return this.classifyEgress({ type: 'axona', payload: frame }, meta, 'datachannel');
+    if (meta.cause !== 'keepalive') return 'genericTransit';
     if (frame.type === 'ping') return 'linkMaintenance';
     if (frame.type === 'pong') return 'controlReply';
     return 'genericTransit';
   }
 
-  classifyEgress(msg, meta = {}) {
+  /**
+   * v0.9: a class is assigned from the frame's shape AND the trusted local
+   * `meta.cause` the write site supplies AND the point. The type of a frame is
+   * never evidence of where it came from: a received `reinforce` relabelled as
+   * maintenance, a `peer-list` without the admission that emits it, an
+   * upstream-only control frame aimed at a client, all read `genericTransit`.
+   * Causes: connect | admission | close | reply | signal-relay | kernel-request |
+   * kernel-notify | kernel-reply | keepalive | uplink-socket.
+   */
+  classifyEgress(msg, meta = {}, point = 'client') {
     if (!msg || typeof msg !== 'object') return 'genericTransit';
+    const cause = typeof meta.cause === 'string' ? meta.cause : null;
     if (msg.type !== 'axona') {
+      if (point === 'uplink') {
+        // The bridge as a CLIENT of its upstream: only the kernel's web transport
+        // writes this socket, and only these bare frames leave it.
+        if (cause !== 'uplink-socket') return 'genericTransit';
+        switch (msg.type) {
+          case 'client-hello': case 'ping': case 'peer-list-request': case 'turn-refresh': return 'controlBare';
+          case 'signal': return 'signalRelay';
+          default: return 'genericTransit';
+        }
+      }
       switch (msg.type) {
-        case 'signal':       return 'signalRelay';
-        case 'pong':         return 'controlReply';
+        case 'signal':       return cause === 'signal-relay' ? 'signalRelay' : 'genericTransit';
+        case 'pong':         return cause === 'reply' ? 'controlReply' : 'genericTransit';
         case 'peer-list':
-        case 'turn':         return meta.inReplyTo ? 'controlReply' : 'controlBare';
-        case 'version-gate': case 'welcome': case 'peer-joined': case 'peer-left':
-        case 'client-hello': case 'ping': case 'peer-list-request': case 'turn-refresh':
-          return 'controlBare';
-        default:             return 'genericTransit';
+        case 'turn':
+          if (cause === 'reply' && meta.inReplyTo) return 'controlReply';
+          return cause === 'admission' ? 'controlBare' : 'genericTransit';
+        case 'version-gate': return cause === 'connect' ? 'controlBare' : 'genericTransit';
+        case 'welcome':      return cause === 'admission' ? 'controlBare' : 'genericTransit';
+        case 'peer-joined':  return cause === 'admission' ? 'controlBare' : 'genericTransit';
+        case 'peer-left':    return cause === 'close' ? 'controlBare' : 'genericTransit';
+        default:             return 'genericTransit';   // incl. client-hello/ping/… toward a client
       }
     }
     const p = msg.payload;
     if (!p || typeof p !== 'object') return 'genericTransit';
+    const fromKernel = cause === 'kernel-request' || cause === 'kernel-notify' || cause === 'kernel-reply' || cause === 'uplink-socket';
     if (p.k === 'res') {
+      if (cause !== 'kernel-reply' && cause !== 'uplink-socket') return 'genericTransit';
       const b = p.body;
       if (b && typeof b === 'object' && (b.error === 'transit-refused' || b.refused === true)) return 'refusalReply';
       if (meta.reqType === 'directory:sync') return 'directorySync';
@@ -352,7 +383,9 @@ export class AirGap {
     }
     const t = p.type;
     if (p.k === 'ntf') {
-      if (t === 'hello' || t === 'hello-ack') return 'hello';
+      if (t === 'hello') return (cause === 'admission' || cause === 'uplink-socket') ? 'hello' : 'genericTransit';
+      if (t === 'hello-ack') return (cause === 'admission' || cause === 'uplink-socket' || cause === 'kernel-notify') ? 'hello' : 'genericTransit';
+      if (!fromKernel) return 'genericTransit';
       if (LINK_MAINT.has(t)) return 'linkMaintenance';
       if (typeof t === 'string' && t.startsWith('direct_')) {
         const inner = t.slice('direct_'.length);
@@ -361,6 +394,7 @@ export class AirGap {
       return 'genericTransit';
     }
     if (p.k === 'req') {
+      if (!fromKernel) return 'genericTransit';
       if (t === 'directory:sync') return 'directorySync';
       if (t === 'lookup_step' || t === 'find_closest_set') return 'discoveryRequest';
       if (t === 'ping') return 'linkMaintenance';
@@ -385,17 +419,22 @@ export class AirGap {
    * @param {'client'|'uplink'} point
    */
   egressWrite(point, msg, meta = {}) {
-    const cls = point === 'datachannel' ? this.classifyDataChannel(msg, meta) : this.classifyEgress(msg, meta);
     const p = (point in this.egress) ? point : 'client';
+    const cls = p === 'datachannel' ? this.classifyDataChannel(msg, meta) : this.classifyEgress(msg, meta, p);
     this.egress[p].attempts[cls]++;
     if (cls === 'genericTransit') { this.egressRefused[p]++; return { cls, allowed: false }; }
     return { cls, allowed: true };
   }
-  /** The physical send returned: count the WRITE for its class at that point. */
-  egressWritten(point, cls) {
+  _bump(point, table, cls) {
     const p = (point in this.egress) ? point : 'client';
-    if (cls in this.egress[p].writes) this.egress[p].writes[cls]++;
+    if (cls in this.egress[p][table]) this.egress[p][table][cls]++;
   }
+  /** The physical send is about to be CALLED. */
+  egressInvoked(point, cls)     { this._bump(point, 'invoked', cls); }
+  /** The call returned without a synchronous throw (a send-call observation, not delivery). */
+  egressWritten(point, cls)     { this._bump(point, 'returned', cls); }
+  egressThrew(point, cls)       { this._bump(point, 'threw', cls); }
+  egressAsyncFailed(point, cls) { this._bump(point, 'asyncFailed', cls); }
 
   // ── reporting ───────────────────────────────────────────────────────
   _snapshotCounts() {
@@ -405,6 +444,7 @@ export class AirGap {
       egressClientAttempts: { ...this.egress.client.attempts },
       egressUplinkAttempts: { ...this.egress.uplink.attempts },
       egressDcAttempts: { ...this.egress.datachannel.attempts },
+      egressInvokedGeneric: this.egress.client.invoked.genericTransit + this.egress.uplink.invoked.genericTransit + this.egress.datachannel.invoked.genericTransit,
       egressRefused: { ...this.egressRefused },
       directory: { ...this.directory },
     };
@@ -428,14 +468,16 @@ export class AirGap {
       ingressByType: byType,
       transport: { ...this.transport },
       egress: {
-        client:      { attempts: { ...this.egress.client.attempts }, writes: { ...this.egress.client.writes } },
-        uplink:      { attempts: { ...this.egress.uplink.attempts }, writes: { ...this.egress.uplink.writes } },
-        datachannel: { attempts: { ...this.egress.datachannel.attempts }, writes: { ...this.egress.datachannel.writes } },
+        client:      copyPoint(this.egress.client),
+        uplink:      copyPoint(this.egress.uplink),
+        datachannel: copyPoint(this.egress.datachannel),
       },
       egressRefused: { ...this.egressRefused },
-      // v0.4 §7.2.2: forwardedGeneric is an EGRESS count held at zero — the WRITES,
-      // measured where every other write is. Attempts are reported beside it.
-      forwardedGeneric: this.egress.client.writes.genericTransit + this.egress.uplink.writes.genericTransit + this.egress.datachannel.writes.genericTransit,
+      // v0.4 §7.2.2 / v0.9: forwardedGeneric is the EGRESS count held at zero —
+      // genericTransit send INVOCATIONS over the three points, counted where every
+      // other class's invocations are. A forbidden invocation is the failure
+      // whatever the send did afterwards. Attempts are reported beside it.
+      forwardedGeneric: this.egress.client.invoked.genericTransit + this.egress.uplink.invoked.genericTransit + this.egress.datachannel.invoked.genericTransit,
       genericTransitAttempts: this.egress.client.attempts.genericTransit + this.egress.uplink.attempts.genericTransit + this.egress.datachannel.attempts.genericTransit,
       directory: { ...this.directory },
     };
@@ -464,6 +506,8 @@ export class AirGap {
              + (cur.egressUplinkAttempts.genericTransit - prev.egressUplinkAttempts.genericTransit)
              + (cur.egressDcAttempts.genericTransit - prev.egressDcAttempts.genericTransit);
     if (gt) { delta.genericTransitRefused = gt; any = true; }
+    const gi = cur.egressInvokedGeneric - prev.egressInvokedGeneric;
+    if (gi) { delta.genericTransitINVOKED = gi; any = true; }   // an enforcement failure, never expected
     for (const k of ['rootUnreachable', 'staleRoot']) {
       const d = cur.directory[k] - prev.directory[k];
       if (d) { delta[k] = d; any = true; }

@@ -177,11 +177,13 @@ async function main() {
     const ig = h.airGap.ingress;
     const sum = Object.entries(ig).filter(([k]) => k !== 'decoded' && k !== 'transitAttempted').reduce((n, [, v]) => n + v, 0);
     check('buckets sum to messages delivered to the decoder', sum === ig.decoded, `${sum} vs ${ig.decoded}`);
-    const eg = h.airGap.egress.client.writes;
+    const eg = h.airGap.egress.client.returned;
+    const inv = h.airGap.egress.client.invoked;
     const at = h.airGap.egress.client.attempts;
-    check('genericTransit WRITES = 0 and ATTEMPTS = 0 on both points (nothing tried to leave carrying another node\'s frame)',
-      eg.genericTransit === 0 && at.genericTransit === 0 && h.airGap.egress.uplink.writes.genericTransit === 0 && h.airGap.egress.uplink.attempts.genericTransit === 0 && h.airGap.egressRefused.client === 0);
-    check('every class: writes ≤ attempts, and equal here (no send threw)', Object.keys(eg).every((k) => eg[k] <= at[k]) && Object.keys(eg).every((k) => eg[k] === at[k]), JSON.stringify({ at, eg }));
+    check('genericTransit INVOKED = 0 and ATTEMPTS = 0 on every point (nothing tried to leave carrying another node\'s frame)',
+      inv.genericTransit === 0 && at.genericTransit === 0 && h.airGap.genericTransitAttempts === 0 && h.airGap.forwardedGeneric === 0 && h.airGap.egressRefused.client === 0);
+    check('every class: returned ≤ invoked ≤ attempts, and equal here (no send threw)', Object.keys(eg).every((k) => eg[k] <= inv[k] && inv[k] <= at[k]) && Object.keys(eg).every((k) => eg[k] === at[k]), JSON.stringify({ at, inv, eg }));
+    check('threw and asyncFailed are 0 on the client point', Object.values(h.airGap.egress.client.threw).every((v) => v === 0) && Object.values(h.airGap.egress.client.asyncFailed).every((v) => v === 0));
     check('controlBare ≥ 3 sockets × (version-gate + welcome + peer-list)', eg.controlBare >= 9, String(eg.controlBare));
     check('hello ≥ 3 (one NH1 hello from the bridge per admitted socket)', eg.hello >= 3, String(eg.hello));
     check('refusalReply = 3 (11, 12, 13)', eg.refusalReply === 3, String(eg.refusalReply));
@@ -236,7 +238,7 @@ async function main() {
     check('B received NOTHING from A across the bridge (no req, no ntf, no tunnelled frame)', B.st.frames.length === bFramesBefore, `${B.st.frames.length - bFramesBefore} frames`);
     const h = await healthz();
     check('genericTransit attempts AND writes still 0 on every point', h.airGap.genericTransitAttempts === 0 && h.airGap.forwardedGeneric === 0, JSON.stringify({ a: h.airGap.genericTransitAttempts, w: h.airGap.forwardedGeneric }));
-    check('the data-channel point is reported (attempts/writes, zero without an uplink)', h.airGap.egress.datachannel && h.airGap.egress.datachannel.writes.genericTransit === 0);
+    check('the data-channel point is reported (attempts/invoked/returned, zero without an uplink)', h.airGap.egress.datachannel && h.airGap.egress.datachannel.invoked.genericTransit === 0 && h.airGap.egress.datachannel.attempts.genericTransit === 0);
     try { A.ws.close(1000); B.ws.close(1000); } catch {}
   }
 

@@ -336,7 +336,7 @@ export class BridgeAxonaNode {
     buildAuthHello({ identity: this._authIdentity, cbv })
       .then((hello) => {
         try {
-          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } });
+          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello', body: hello } }, { cause: 'admission' });
         } catch (err) {
           this._log('hello-send-failed', { connId, err: err.message });
         }
@@ -426,7 +426,7 @@ export class BridgeAxonaNode {
       if (label === 'hello') {
         try {
           const ack = await buildAuthHello({ identity: this._authIdentity, cbv });
-          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: ack } });
+          this._sendToConn(connId, { type: 'axona', payload: { k: 'ntf', type: 'hello-ack', body: ack } }, { cause: 'admission' });
         } catch (err) {
           this._log('hello-ack-failed', { err: err.message });
         }

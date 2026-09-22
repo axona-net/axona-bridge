@@ -76,9 +76,15 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     send(data, ...rest) {
       let msg = null;
       try { msg = typeof data === 'string' ? JSON.parse(data) : null; } catch { msg = null; }
-      const { cls, allowed } = airGap.egressWrite('uplink', msg);
+      // 'uplink-socket' is the trusted local cause: this class is instantiated
+      // only by the kernel's web transport for this socket, and nothing else
+      // writes it. The frame's own type is not evidence of anything.
+      const { cls, allowed } = airGap.egressWrite('uplink', msg, { cause: 'uplink-socket' });
       if (!allowed) { log('egress-refused', { point: 'uplink', type: msg?.type, inner: msg?.payload?.type }); return; }
-      const r = super.send(data, ...rest);
+      airGap.egressInvoked('uplink', cls);
+      let r;
+      try { r = super.send(data, ...rest); }
+      catch (err) { airGap.egressThrew('uplink', cls); throw err; }
       airGap.egressWritten('uplink', cls);
       return r;
     }
@@ -88,8 +94,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
   // classified and counted where it leaves, and a genericTransit frame is refused
   // there, below the composite gate.
   const egressGate = airGap ? {
-    before: (frame) => airGap.egressWrite('datachannel', frame),
+    // `cause` arrives from the kernel's own send sites (kernel-request /
+    // kernel-notify / kernel-reply) or its keepalive — local metadata, never
+    // read from the frame.
+    before: (frame, _peerId, cause) => { const v = airGap.egressWrite('datachannel', frame, { cause: cause ?? null }); if (v.allowed) airGap.egressInvoked('datachannel', v.cls); return v; },
     after:  (cls)   => airGap.egressWritten('datachannel', cls),
+    threw:  (cls)   => airGap.egressThrew('datachannel', cls),
   } : null;
   const transport = webTransport({
     bridgeUrl: upstream,
