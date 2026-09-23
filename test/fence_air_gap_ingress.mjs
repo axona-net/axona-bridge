@@ -22,6 +22,13 @@
 //   D. the partition sums to what the decoder saw; genericTransit egress = 0;
 //      welcome/hello/pong/refusal replies classified on the client point.
 //   E. pre-admission: a req before client-hello gets no reply (bound zero).
+//   H. A's received SUB whose surviving via names client B: the no-role REROUTE
+//      branch restamps it with the bridge's own id addressed to B, a directly
+//      connected client on an introduction edge. B must receive nothing and no
+//      forbidden invocation may occur at any of the three write points.
+//   G. A's route_msg addressed to the BRIDGE ITSELF with SUB for the legacy
+//      directory copy: consumed locally (the bridge roots it), B untouched, the
+//      only new socket invocations are the reply and the serve to A (Aster 89e85dea).
 //   F. two authenticated clients A and B (NH1 complete, both in the synaptome):
 //      A's route_msg / direct_* / __tunneled_direct__ addressed to B → refusal
 //      verdict to A, NOTHING at B, zero genericTransit attempts and writes.
@@ -31,6 +38,8 @@ import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
 import { KERNEL_VERSION, WIRE_VERSION, createNodeIdentity, buildAuthHello, cbvFromNonces } from '@axona/protocol';
 import { MAX_PAYLOAD_BYTES } from '../src/air_gap.js';
+import { deriveTopicIdBig } from '@axona/protocol/pubsub/post.js';
+import { BRIDGE_DIRECTORY_TOPIC } from '@axona/protocol';
 
 const PORT = 8141;
 const WS_URL = `ws://127.0.0.1:${PORT}`;
@@ -239,6 +248,80 @@ async function main() {
     const h = await healthz();
     check('genericTransit attempts AND writes still 0 on every point', h.airGap.genericTransitAttempts === 0 && h.airGap.forwardedGeneric === 0, JSON.stringify({ a: h.airGap.genericTransitAttempts, w: h.airGap.forwardedGeneric }));
     check('the data-channel point is reported (attempts/invoked/returned, zero without an uplink)', h.airGap.egress.datachannel && h.airGap.egress.datachannel.invoked.genericTransit === 0 && h.airGap.egress.datachannel.attempts.genericTransit === 0);
+
+    const bridgeHello = A.st.frames.find((m) => m.type === 'axona' && m.payload?.type === 'hello');
+    const bridgeId = bridgeHello.payload.body.nodeId;
+    const legacy = (await deriveTopicIdBig({ region: 'bridge', name: BRIDGE_DIRECTORY_TOPIC })).toString(16).padStart(66, '0');
+
+    // ── H. the _reroute regression, deterministic (Aster 32556d0d) ──────
+    //     A's RECEIVED publish carries via [bridge, B]. The bridge holds no role, so
+    //     _topicDecision takes its no-role REROUTE branch: via is popped and the
+    //     payload is restamped with the bridge's own id, addressed to B — a
+    //     DIRECTLY CONNECTED client on an introduction edge. That is precisely
+    //     the case where "the bridge has no transit edges" is not the argument:
+    //     the origin addressee exception would otherwise deliver it. It must not,
+    //     because the bridge received this frame; it did not originate it.
+    console.log('[H] a received PUB restamped toward a directly connected client is NOT delivered');
+    {
+      const diag0 = await (await fetch(`http://127.0.0.1:${PORT}/diag`, { headers: { 'x-healthz-token': TOKEN } })).json();
+      check('PRECONDITION: the bridge holds NO role for this copy, so _topicDecision must take its no-role REROUTE branch (not local consumption)',
+        !diag0.axonRoles.some((r) => r.topic === legacy), JSON.stringify(diag0.axonRoles));
+      const hb2 = await healthz();
+      const invB = { ...hb2.airGap.egress.client.invoked };
+      const dcB = { ...hb2.airGap.egress.datachannel.invoked };
+      const upB = { ...hb2.airGap.egress.uplink.invoked };
+      const bBefore3 = B.st.frames.length;
+      // A PUB, not a SUB: once restamped with the bridge's own originId this is
+      // byte-indistinguishable at the write from the bridge's OWN directory entry
+      // (class directoryOwnEntry, which is ALLOWED). The egress classifier cannot
+      // catch it. The origin rule in the hop choice is the only thing that can.
+      A.ws.send(axona({ k: 'req', id: 51, type: 'route_msg', body: { type: 'pubsub:pub', payload: { topicId: legacy, via: [bridgeId, B.idHex], json: JSON.stringify({ msgId: 'a-entry', v: 1, text: 'A entry' }) }, targetId: bridgeId, hops: 0, originId: A.idHex } }));
+      const v51 = await until(() => resFor(A.st, 51), 4000) && resFor(A.st, 51).payload.body;
+      check('the frame is accepted at ingress and consumed (it is addressed to the bridge for a directory copy)', v51 && v51.consumed === true, JSON.stringify(v51));
+      await sleep(500);
+      const atB = B.st.frames.slice(bBefore3);
+      console.log('      [B received]', JSON.stringify(atB.map((m) => (m.type === 'axona' ? `${m.payload?.k}:${m.payload?.type}` : m.type))));
+      check('B received NO route_msg and NO pubsub verb: A\'s publish never crossed the bridge',
+        atB.every((m) => !(m.type === 'axona' && (m.payload?.type === 'route_msg' || String(m.payload?.type || '').startsWith('pubsub:') || String(m.payload?.type || '').startsWith('direct_')))),
+        JSON.stringify(atB.map((m) => m.payload?.type ?? m.type)));
+      check('anything B did receive is a DISCOVERY query about the bridge\'s own placement, which §7.1 permits over an introduction edge',
+        atB.every((m) => m.type === 'axona' && m.payload?.k === 'req' && ['lookup_step', 'find_closest_set', 'local_probe', 'lookahead_probe'].includes(m.payload?.type)),
+        JSON.stringify(atB.map((m) => m.payload?.type ?? m.type)));
+      const ha2 = await healthz();
+      const inv2 = ha2.airGap.egress.client.invoked;
+      check('zero forbidden invocations at ALL THREE physical points', ha2.airGap.forwardedGeneric === 0 && inv2.genericTransit === 0 && ha2.airGap.egress.uplink.invoked.genericTransit === 0 && ha2.airGap.egress.datachannel.invoked.genericTransit === 0, JSON.stringify({ c: inv2.genericTransit, u: ha2.airGap.egress.uplink.invoked.genericTransit, d: ha2.airGap.egress.datachannel.invoked.genericTransit }));
+      check('no new invocation of any class at the uplink or data-channel points', JSON.stringify(ha2.airGap.egress.uplink.invoked) === JSON.stringify(upB) && JSON.stringify(ha2.airGap.egress.datachannel.invoked) === JSON.stringify(dcB));
+      const grew2 = Object.keys(inv2).filter((kk) => inv2[kk] !== invB[kk]);
+      check('at the client socket the only new invocation classes are the reply to A, directory service to A, and the bridge\'s own discovery query — no transit class',
+        grew2.every((kk) => kk === 'controlReply' || kk === 'directoryServe' || kk === 'discoveryRequest'), JSON.stringify(grew2));
+      const diag1 = await (await fetch(`http://127.0.0.1:${PORT}/diag`, { headers: { 'x-healthz-token': TOKEN } })).json();
+      check('EVIDENCE the reroute branch ran: the via-addressed PUB ended as a LOCAL root here, which only the pop-to-bare-topic path produces',
+        diag1.axonRoles.some((r) => r.topic === legacy && r.isRoot === true), JSON.stringify(diag1.axonRoles));
+    }
+
+    // ── G. the ONE received-frame path the bridge can reach: a route_msg
+    //      addressed to the bridge itself for a directory copy (Aster 89e85dea)
+    console.log('[G] self-addressed SUB for a directory copy the bridge now roots: served locally, never re-emitted');
+    const hb = await healthz();
+    const invBefore = { ...hb.airGap.egress.client.invoked };
+    const bBefore2 = B.st.frames.length;
+    A.ws.send(axona({ k: 'req', id: 41, type: 'route_msg', body: { type: 'pubsub:sub', payload: { topicId: legacy, via: [bridgeId], subscriberId: A.idHex, since: 0 }, targetId: bridgeId, hops: 0, originId: A.idHex } }));
+    const v41 = await until(() => resFor(A.st, 41), 4000) && resFor(A.st, 41).payload.body;
+    check('the bridge CONSUMES it (verdict consumed:true, no refusal)', v41 && v41.consumed === true && v41.refused !== true, JSON.stringify(v41));
+    await sleep(400);
+    const diag = await (await fetch(`http://127.0.0.1:${PORT}/diag`, { headers: { 'x-healthz-token': TOKEN } })).json();
+    check('the bridge holds ROOT of the legacy directory copy and serves A from it (rootAllowList admits it)', diag.axonRoles.some((r) => r.topic === legacy && r.isRoot === true), JSON.stringify(diag.axonRoles));
+    check('the legacy copy is in rootAllowList, nothing else was seated', diag.rootAllowList.includes(legacy) && diag.axonRoles.length === 1, String(diag.axonRoles.length));
+    const atB2 = B.st.frames.slice(bBefore2);
+    check('B received no route_msg and no pubsub verb: the subscribe was served here, not re-emitted',
+      atB2.every((m) => !(m.type === 'axona' && (m.payload?.type === 'route_msg' || String(m.payload?.type || '').startsWith('pubsub:') || String(m.payload?.type || '').startsWith('direct_')))),
+      JSON.stringify(atB2.map((m) => m.payload?.type ?? m.type)));
+    const ha = await healthz();
+    const inv = ha.airGap.egress.client.invoked;
+    const grew = Object.keys(inv).filter((k) => inv[k] !== invBefore[k]);
+    check('the only NEW client-socket invocation classes are the reply to A, directory service to A and the bridge\'s own discovery query; nothing generic, nothing re-emitted',
+      grew.every((k) => k === 'controlReply' || k === 'directoryServe' || k === 'discoveryRequest') && inv.genericTransit === 0 && ha.airGap.forwardedGeneric === 0, JSON.stringify({ grew, gt: inv.genericTransit }));
+
     try { A.ws.close(1000); B.ws.close(1000); } catch {}
   }
 
