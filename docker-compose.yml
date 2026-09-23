@@ -19,6 +19,10 @@ services:
   bridge:
     build: .
     image: axona-bridge
+    init: true          # PID 1 must reap: the image HEALTHCHECK runs `node -e …` every 30 s
+                        # and node as PID 1 never wait()s. East reached 489 zombies /
+                        # 601 host procs on 2026-09-23, could not fork, and went unhealthy
+                        # with 10 s event-loop stalls at 130% CPU. West had 364.
     restart: unless-stopped
     env_file: .env          # BRIDGE_PUBLIC_URL, BRIDGE_DIRECTORY, BRIDGE_LAT/LNG/REGION_LABEL, TURN_AUTH_SECRET, TURN_URLS, PORT, LOG_LEVEL
     volumes:
