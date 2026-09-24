@@ -864,6 +864,9 @@ const httpServer = http.createServer((req, res) => {
           known:   bridgeBook ? bridgeBook.count : 0,
         },
         uplink: bridgeNode.uplinkStatus(),
+        // The WebRTC side of the degree cap. Null when no uplink or no cap —
+        // which is different from a cap that is configured and idle.
+        meshDegree: bridgeNode.meshDegree?.() ?? null,
         // Axonic admission + measured capacity (B2). OPERATOR-ONLY: role counts,
         // saturation and refusal tallies say where and when placement pressure
         // would succeed, which is precisely what E-1 asks us not to publish.
@@ -997,6 +1000,11 @@ const httpServer = http.createServer((req, res) => {
         try { const a = axon?.inspectAdmission?.(); return a ? safeContext(a) : null; } catch { return null; }
       })(),
       kernelLog: { ...kernelLog.stats(), armed: kernelLog.installed, intakes: kernelLog.intakes, latTrace: latTraceOn() },
+      // The WebRTC half of this bridge's degree. `counts.connections` is the
+      // INBOUND WebSocket half; the two are separate populations governed by
+      // separate mechanisms, and reading one as the node's degree is how the
+      // mesh side went unbounded unnoticed.
+      meshDegree: bridgeNode.meshDegree?.() ?? null,
       // The connections list shows BOTH admitted & pending so we can
       // see peers stuck in the client-hello race or post-admit but
       // pre-handshake.

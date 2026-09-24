@@ -256,6 +256,22 @@ export class BridgeAxonaNode {
     return { upstream: this._uplink?.upstream ?? null, connected: !!this._uplink };
   }
 
+  /**
+   * The uplink mesh's bounded-degree accounting, or null when there is no
+   * uplink or no cap (4.96.0 / bridge 2.139.0).
+   *
+   * WHY IT IS HERE: BRIDGE_MAX_PEERS is visible on /healthz and /diag, and the
+   * WebRTC cap that is supposed to mirror it was visible nowhere. On
+   * 2026-09-24 that turned a simple question — is the mesh cap firing — into a
+   * source reading, while the bridge sat at 40 open channels against a trigger
+   * of 18. `open` is the number the cap acts on; `retired` and `refused` are
+   * monotonic since process start, so read them as rates.
+   */
+  meshDegree() {
+    try { return this._uplink?.transport?.meshDegreeStats?.() ?? null; }
+    catch { return null; }
+  }
+
   async stop() {
     if (this._uplink)    { try { await this._uplink.transport.stop(); } catch { /* dying */ } }
     if (this._peer)      await this._peer.stop();
