@@ -68,14 +68,27 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     pow:        typeof identity.pow === 'string' ? identity.pow : '',
   };
 
+  // SYMMETRY (David 2026-09-24). BRIDGE_MAX_PEERS bounds the bridge's INBOUND
+  // WebSocket population. It says nothing about the WebRTC mesh this uplink
+  // joins, and on 2026-09-24 that was most of west's connectivity: one inbound
+  // socket, seven WebRTC peers, synaptome seven. So the mesh gets the SAME
+  // number by default — a bridge that is mediocre on one side and a full mesh
+  // participant on the other is not capped, it is half-capped.
+  // BRIDGE_MESH_MAX_PEERS overrides it; 0 disables the mesh cap alone.
+  const wsCap   = Number.parseInt(env.BRIDGE_MAX_PEERS ?? '32', 10);
+  const meshCap = Number.parseInt(env.BRIDGE_MESH_MAX_PEERS ?? String(wsCap), 10);
   const transport = webTransport({
     bridgeUrl: upstream,
     identity:  uplinkIdentity,
     meshRelay: true,        // integrate fully (help relay signaling like a relay)
     reconnect: true,        // self-heal the uplink to this upstream
+    // Inert when meshCap is 0 or unparseable — the kernel treats that as
+    // unbounded, which is the pre-4.95.0 behaviour.
+    meshDegree: Number.isFinite(meshCap) && meshCap > 0 ? { maxPeers: meshCap } : null,
     WebSocketImpl,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });
+  log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap });
 
   log('selected', { upstream });
   return { transport, upstream };
