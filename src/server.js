@@ -937,26 +937,39 @@ const httpServer = http.createServer((req, res) => {
     // replayCache waiting for late-arriving subscribers).  This is
     // the critical observability surface for debugging
     // publish-before-subscribe replay failures.
-    const axonRoles = [];
-    // The AxonaManager lives at peer._axonaManager (the kernel's lazily-
-    // built pub/sub engine), NOT bridgeNode._axon — that legacy field
-    // was never set, so this readout silently reported zero roles
-    // regardless of actual state.  Reach through the AxonaPeer.
+    // ROLES COME FROM THE KERNEL'S OWN ACCESSOR, not from hand-reading the role
+    // objects. This block used to build its own row per role and read THREE
+    // FIELD NAMES THAT DO NOT EXIST: `role.replayCache` (the field is `cache`;
+    // replayCacheSize is only a constructor OPTION), `role.roleCreatedAt` (it is
+    // `createdAt`) and `role.emptiedAt` (no such field anywhere in the kernel).
+    // So cacheSize read 0 for every role and both ages read null, for as long as
+    // this endpoint has existed — and on 2026-09-24 I used that zero to argue in
+    // public that a production bridge was holding "141 roles with zero cached
+    // messages". The number was a missing property, not a measurement.
+    // `inspectRoles()` is maintained beside the role shape and already carries
+    // nature (ROOT|BACKUP|CHILD), holder (this node's own sub/host intent),
+    // subscribers and a real cache size. fence_diag_role_fields pins it.
     const axon = bridgeNode.axon;
-    if (axon?.axonRoles) {
-      for (const [topicId, role] of axon.axonRoles) {
-        axonRoles.push({
-          topic:        idToHex(topicId),
-          isRoot:       !!role.isRoot,
-          children:     [...(role.children?.keys?.() ?? [])].map(idToHex),
-          cacheSize:    role.replayCache?.length ?? 0,
-          createdAgoS:  role.roleCreatedAt
-            ? Math.floor((now - role.roleCreatedAt) / 1000) : null,
-          emptiedAgoS:  role.emptiedAt
-            ? Math.floor((now - role.emptiedAt) / 1000) : null,
-        });
-      }
-    }
+    const axonRoles = (typeof axon?.inspectRoles === 'function')
+      ? axon.inspectRoles().map((r) => ({
+          topic:       r.topicId,
+          isRoot:      r.isRoot,
+          nature:      r.nature,               // ROOT | BACKUP | CHILD — a BACKUP is a pushed replica
+          holder:      r.holder,               // this node's own peer.sub()/peer.host() intent
+          subscribers: r.subscribers,          // seated subscriber COUNT (children is a subset)
+          children:    r.children.length,      // a COUNT: inspectRoles returns child node ids and
+                                               // /diag does not record node ids.
+          cacheSize:   r.replayCacheSize,      // real: r.cache.length inside the kernel
+        }))
+      : [];
+
+    // The reap counters, lifted out of `admission` to the top level. The
+    // question an operator asks of a climbing role count is "is the reaper
+    // firing at all", and the answer should not be three levels down. Null on a
+    // kernel older than 4.93.0, which is different from zero.
+    const reaped = (() => {
+      try { const a = axon?.inspectAdmission?.(); return a?.reaped ? { ...a.reaped } : null; } catch { return null; }
+    })();
 
     const body = JSON.stringify({
       version:        VERSION,
@@ -997,7 +1010,17 @@ const httpServer = http.createServer((req, res) => {
         boundButNotInSynaptome:
           conns.filter(c => c.nodeId && !c.inSynaptome).length,
         axonRoles:   axonRoles.length,
+        // The discriminator for role accrual. A role with NO subscribers and an
+        // empty cache is reapable on sight (4.92.0); one with subscribers waits
+        // out ROLE_IDLE_TTL_MS. Reading the two counts beside the reap counters
+        // says which of those a standing role count is made of, without pulling
+        // the whole role list.
+        axonRolesSubscribed:   axonRoles.filter(r => r.subscribers > 0).length,
+        axonRolesUnsubscribed: axonRoles.filter(r => r.subscribers === 0).length,
+        axonSubscribers:       axonRoles.reduce((n, r) => n + r.subscribers, 0),
+        axonRolesCaching:      axonRoles.filter(r => r.cacheSize > 0).length,
       },
+      reaped,
       axonRoles,
       connections: conns,
     }, null, 2);
