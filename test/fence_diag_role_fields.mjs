@@ -120,5 +120,59 @@ ok('/diag lifts the reap counters to the top level', /^\s*reaped,\s*$/m.test(DIA
     typeof adm.reaped?.dead === 'number' && typeof adm.reaped?.idle === 'number', JSON.stringify(adm.reaped));
 }
 
+// ── 5. lastReplicaAt: NEVER and LONG AGO must not read alike ──────────────
+// Added 2026-09-25. The standby-population question — is a given empty backup
+// waiting on a live principal or a departed one — was unanswerable from outside
+// the process because this stamp was not on any surface. Every claim made about
+// those roles rested on inference. The trap the fence exists for: `0` means
+// never stamped, and `now - 0` is an age of fifty-six years, which would read as
+// the stalest possible backup rather than as no reading at all.
+{
+  ok('a never-stamped role reports lastReplicaAt 0', row.lastReplicaAt === 0, String(row.lastReplicaAt));
+  ok('…and its age is NULL, not a number measured from the epoch',
+    row.lastReplicaAgeMs === null, JSON.stringify(row.lastReplicaAgeMs));
+
+  // A stamped backup, on a clock we control, so the age is checked against a
+  // known elapsed time rather than against whatever Date.now() happened to be.
+  let clock = 1_000_000;
+  const axon2 = new AxonaManager({ dht, now: () => clock });
+  axon2._log = () => {};
+  const T2 = 0x99n;
+  const backup = makeRole(T2, false, clock);
+  backup.backupOf = 'c'.repeat(66);          // nature: backup
+  backup.lastReplicaAt = clock;              // principal just spoke
+  axon2.axonRoles.set(T2, backup);
+
+  const fresh = axon2.inspectRoles()[0];
+  ok('a just-stamped backup has nature backup', fresh.nature === 'backup', fresh.nature);
+  ok('…and age 0 at the instant of the stamp', fresh.lastReplicaAgeMs === 0, String(fresh.lastReplicaAgeMs));
+
+  clock += 45_000;
+  ok('…the age tracks the clock (45s later reads 45000)',
+    axon2.inspectRoles()[0].lastReplicaAgeMs === 45_000, String(axon2.inspectRoles()[0].lastReplicaAgeMs));
+
+  clock += 30_000;                            // 75s total: past BACKUP_EVICT_MS
+  const stale = axon2.inspectRoles()[0];
+  ok('…and keeps climbing past the discharge window', stale.lastReplicaAgeMs === 75_000, String(stale.lastReplicaAgeMs));
+  ok('…while lastReplicaAt stays the STAMP, not the age', stale.lastReplicaAt === 1_000_000, String(stale.lastReplicaAt));
+
+  // A clock that steps backwards (NTP correction) must not yield a negative age.
+  clock = 999_000;
+  ok('a backwards clock floors the age at 0, never negative',
+    axon2.inspectRoles()[0].lastReplicaAgeMs === 0, String(axon2.inspectRoles()[0].lastReplicaAgeMs));
+}
+
+// ── 6. /diag ships the threshold and the standby split ────────────────────
+ok('/diag publishes backupEvictMs beside the ages', /backupEvictMs:/.test(DIAG));
+for (const key of ['backupsFresh', 'backupsStale', 'backupsNever']) {
+  ok(`/diag counts carry \`${key}\``, new RegExp(`${key}:`).test(DIAG));
+}
+// NEVER is counted off the stamp, not off the age, so it cannot be folded into
+// STALE by an age comparison that treats null as large.
+ok('backupsNever tests lastReplicaAt === 0, not the age',
+  /backupsNever:[^\n]*lastReplicaAt === 0/.test(DIAG));
+ok('backupsStale excludes null ages explicitly',
+  /backupsStale:[^\n]*lastReplicaAgeMs != null/.test(DIAG));
+
 console.log(fail ? `\n  ${fail} FAILED` : `\n  all ${n} checks passed`);
 process.exit(fail ? 1 : 0);

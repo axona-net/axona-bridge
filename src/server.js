@@ -53,6 +53,10 @@ import { selectAnchors }   from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
 import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
+// The discharge threshold a role's lastReplicaAgeMs is read against. Shipped on
+// /diag beside the ages because an age without its threshold is not a reading —
+// an operator would have to know a kernel constant to interpret the field.
+import { BACKUP_EVICT_MS } from '@axona/protocol/pubsub/constants.js';
 
 // Derive from package.json so /healthz never drifts from the deployed build
 // (the hardcoded literal lagged twice — showed 2.18.0 then 2.19.0 while
@@ -963,6 +967,13 @@ const httpServer = http.createServer((req, res) => {
           children:    r.children.length,      // a COUNT: inspectRoles returns child node ids and
                                                // /diag does not record node ids.
           cacheSize:   r.replayCacheSize,      // real: r.cache.length inside the kernel
+          // Only a BACKUP is ever stamped. null age = NEVER stamped, which is a
+          // different state from a large age and must not read as one. Compare
+          // against backupEvictMs below: past it, a re-homed subscriber-less
+          // backup is dischargeable (repairPlane.js:196). Undefined on a kernel
+          // older than 4.99.0.
+          lastReplicaAt:    r.lastReplicaAt,
+          lastReplicaAgeMs: r.lastReplicaAgeMs,
         }))
       : [];
 
@@ -1027,7 +1038,17 @@ const httpServer = http.createServer((req, res) => {
         axonRolesUnsubscribed: axonRoles.filter(r => r.subscribers === 0).length,
         axonSubscribers:       axonRoles.reduce((n, r) => n + r.subscribers, 0),
         axonRolesCaching:      axonRoles.filter(r => r.cacheSize > 0).length,
+        // The standby population split by whether its principal has spoken
+        // inside the discharge window. NEVER-stamped is counted apart from
+        // STALE: a backup that has heard nothing at all and one whose root has
+        // gone quiet are different states, and collapsing them is what made the
+        // question unanswerable in the first place. Undefined ages (pre-4.99.0
+        // kernel) fall in none of the three.
+        backupsFresh:  axonRoles.filter(r => r.nature === 'backup' && r.lastReplicaAgeMs != null && r.lastReplicaAgeMs <= BACKUP_EVICT_MS).length,
+        backupsStale:  axonRoles.filter(r => r.nature === 'backup' && r.lastReplicaAgeMs != null && r.lastReplicaAgeMs >  BACKUP_EVICT_MS).length,
+        backupsNever:  axonRoles.filter(r => r.nature === 'backup' && r.lastReplicaAt === 0).length,
       },
+      backupEvictMs: BACKUP_EVICT_MS,   // the threshold the ages above are read against
       reaped,
       axonRoles,
       connections: conns,
