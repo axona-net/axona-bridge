@@ -967,11 +967,28 @@ const httpServer = http.createServer((req, res) => {
           children:    r.children.length,      // a COUNT: inspectRoles returns child node ids and
                                                // /diag does not record node ids.
           cacheSize:   r.replayCacheSize,      // real: r.cache.length inside the kernel
-          // Only a BACKUP is ever stamped. null age = NEVER stamped, which is a
-          // different state from a large age and must not read as one. Compare
-          // against backupEvictMs below: past it, a re-homed subscriber-less
-          // backup is dischargeable (repairPlane.js:196). Undefined on a kernel
-          // older than 4.99.0.
+          // Only becomeBackup() STAMPS this (rootClaim.js:283) — but nothing
+          // CLEARS it. retireBackup() drops backupOf and _backupTopics and
+          // leaves the stamp where it is, so a role that has finished its
+          // standby life keeps ageing a clock nobody winds. On 2026-09-27 a
+          // production row read nature=child with an age of 28.7 h against a
+          // 60 s window, and the obvious reading — a standby stale for over a
+          // day — was exactly backwards: it was a RETIRED backup, i.e. the
+          // discharge path having WORKED. So read this field ONLY on rows where
+          // nature === 'backup'; on any other nature it is a fossil of an
+          // earlier life and means nothing about now. The backupsFresh /
+          // backupsStale / backupsNever rollups below already filter that way,
+          // which is why they can disagree with a raw scan of these rows.
+          // null age = NEVER stamped, a different state from a large age and it
+          // must not read as one. Compare against backupEvictMs below: past it,
+          // a re-homed subscriber-less backup is dischargeable
+          // (repairPlane.js:196). Undefined on a kernel older than 4.99.0.
+          //
+          // NOTE the window cannot fire under a LIVING principal: a root
+          // re-arms full replication every ROOT_REPLICATE_FULL_MS (60 s) and
+          // BACKUP_EVICT_MS is also 60 s, so a standby reads fresh for as long
+          // as its root breathes — including when that root's cache is empty
+          // and there is nothing left to stand by for. See axona-protocol#72.
           lastReplicaAt:    r.lastReplicaAt,
           lastReplicaAgeMs: r.lastReplicaAgeMs,
         }))
