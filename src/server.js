@@ -49,7 +49,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { startDirectoryPublisher } from './bridge_directory.js';
 import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
-import { selectAnchors, orderSameRegionFirst } from './anchor_select.js';
+import { selectAnchors, orderSameRegionFirst, claimedRegion } from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
 import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
@@ -1114,7 +1114,7 @@ wss.on('connection', (ws, req) => {
     admitted: false,      // flipped to true after client-hello version check
     helloTimer: null,
     peerVersion: null,
-    claimedNodeId: null,  // hex nodeId the client-hello CLAIMS (unauthenticated; ordering hint only). Kernels at 4.102.0 send none → null
+    claimedRegion: null,  // top byte of the nodeId the client-hello CLAIMS (untrusted selection/order hint, anchor_select.claimedRegion). Kernels at 4.102.0 send none → null
 
     meshBound: null,      // last reported live mesh size (vitality); null until first ping carries it
     meshBoundAt: 0,       // freshness stamp for meshBound
@@ -1192,7 +1192,7 @@ wss.on('connection', (ws, req) => {
     // BOUND nodeId (connRegion, as graduation already does), never from the
     // connection handle, whose first two characters are a sequence number.
     // The newcomer's own region is the client-hello claim, or null.
-    const newcomerRegion = conn.claimedNodeId ? conn.claimedNodeId.slice(0, 2) : null;
+    const newcomerRegion = conn.claimedRegion;
     let admittedPeers;
     if (NURSERY_ON) {
       const cands = [];
@@ -1284,13 +1284,17 @@ wss.on('connection', (ws, req) => {
       // for the peer-list sent on admission, and the bridge binds the
       // authenticated nodeId only on hello-ack, which comes AFTER that list.
       // A client-hello that carries `nodeId` supplies the region as a CLAIM:
-      // it orders a list and chooses anchors, nothing more, and a false
-      // claim mis-orders only the claimant's own list. Kernels at 4.102.0
-      // send no nodeId; the claim is then null and no same-region affinity
-      // applies to that newcomer (before this change the affinity grouped by
-      // the connection handle's first two characters, a sequence number).
-      conn.claimedNodeId = (typeof msg.nodeId === 'string' && /^[0-9a-f]{66}$/.test(msg.nodeId))
-        ? msg.nodeId : null;
+      // an untrusted selection/order hint. It chooses the claimant's anchors
+      // and orders the claimant's list; through those anchors' shared
+      // anchorUses counters it shifts later newcomers' scores, and it steers
+      // introductions toward the claimed region (Aster c771508b). It is never
+      // a binding, an authentication, a graduation region or a custody
+      // authority; those read the bound identity (connRegion). Kernels at
+      // 4.102.0 send no nodeId; the claim is then null and no same-region
+      // affinity applies to that newcomer (before this change the affinity
+      // grouped by the connection handle's first two characters, a sequence
+      // number).
+      conn.claimedRegion = claimedRegion(msg);
       if (!peerVersion) {
         logErr('client-hello-missing-version', { connId: id });
         try {

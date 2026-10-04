@@ -11,13 +11,19 @@
 //   7. ROW 2 FENCE (Hold-and-Fill v0.5, axona-docs 4334504): the region is
 //      the candidate's `region` field (its bound nodeId's top byte), never
 //      the id's first two characters. Ids here are connection handles
-//      (`c1`, `c2`, …), as on the real bridge. With the handle-prefix
-//      reading restored, 7a–7d fail.
+//      (`c1`, `c2`, …), as on the real bridge. With main's handle-prefix
+//      selection and the old prefix ordering restored, 7a, 7b, 7c, 7e and
+//      8a fail (measured 2026-10-04; 7d passes either way because an
+//      unknown newcomer region never matched a prefix before either).
 //   8. orderSameRegionFirst: region-mates first by bound-nodeId region,
 //      stable; unknown newcomer region → order unchanged.
+//   9. claimedRegion: the client-hello `nodeId` CLAIM parser. Absent,
+//      malformed (short, uppercase, non-hex, non-string) → null; valid →
+//      its top byte. A claim is an untrusted selection/order hint and the
+//      parser is the only place it is read; it never reaches a binding.
 //
 // Run: node scripts/smoke-anchor-select.js
-import { selectAnchors, orderSameRegionFirst } from '../src/anchor_select.js';
+import { selectAnchors, orderSameRegionFirst, claimedRegion } from '../src/anchor_select.js';
 
 let pass = 0, fail = 0;
 const ok = (m, c, x = '') => { console.log(`  ${c ? '✓' : '✗'} ${m} ${x}`); c ? pass++ : fail++; };
@@ -160,6 +166,24 @@ const regionOfIn = (cands) => (id) => cands.find((c) => c.id === id)?.region ?? 
   ok('8d handle prefix is never consulted: newRegion "c1" matches nothing',
     orderSameRegionFirst(peers, regionOf, 'c1').join(',') === 'c1,c2,c3,c4,c5');
   ok('8e returns a copy', orderSameRegionFirst(peers, regionOf, '80') !== peers);
+}
+
+// 9. claimedRegion: the client-hello nodeId claim parser
+{
+  const valid = '7f' + 'a'.repeat(64);
+  ok('9a absent → null', claimedRegion({ type: 'client-hello', version: '1' }) === null);
+  ok('9b non-string → null', claimedRegion({ nodeId: 42 }) === null && claimedRegion({ nodeId: null }) === null);
+  ok('9c short → null', claimedRegion({ nodeId: valid.slice(0, 65) }) === null);
+  ok('9d long → null', claimedRegion({ nodeId: valid + 'a' }) === null);
+  ok('9e uppercase → null', claimedRegion({ nodeId: valid.toUpperCase() }) === null);
+  ok('9f non-hex → null', claimedRegion({ nodeId: 'zz' + 'a'.repeat(64) }) === null);
+  ok('9g valid → top byte', claimedRegion({ nodeId: valid }) === '7f');
+  ok('9h a connection handle is not a claim', claimedRegion({ nodeId: 'c1a' }) === null);
+  // valid-but-mismatching: the claim says 7f, the bound identity (what
+  // connRegion would return) says 80. The parser reports the CLAIM; the
+  // caller passes it as newRegion only, never as a candidate's region.
+  ok('9i parser reports the claim, not a binding', claimedRegion({ nodeId: valid }) !== '80');
+  ok('9j no message → null', claimedRegion(null) === null && claimedRegion(undefined) === null);
 }
 
 // 6. never the newcomer itself

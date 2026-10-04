@@ -104,6 +104,24 @@ export function selectAnchors(candidates, {
 }
 
 /**
+ * The newcomer's region CLAIM from its client-hello. The bridge binds the
+ * authenticated nodeId only on hello-ack, after the peer-list is sent, so the
+ * region used for anchor affinity and list order at admission can only be a
+ * claim. It is an UNTRUSTED SELECTION/ORDER HINT: it picks anchors for the
+ * claimant and orders the claimant's list, and through the chosen anchors'
+ * shared anchorUses counters it shifts later newcomers' scores (Aster
+ * c771508b). It is never a binding, an authentication, a graduation region
+ * or a custody authority; those read the bound identity (server.js
+ * connRegion). This parser is the only reader of the field.
+ * @param {any} msg   the client-hello frame
+ * @returns {string|null} top byte of a well-formed 66-hex nodeId, else null
+ */
+export function claimedRegion(msg) {
+  const v = msg?.nodeId;
+  return (typeof v === 'string' && /^[0-9a-f]{66}$/.test(v)) ? v.slice(0, 2) : null;
+}
+
+/**
  * SAME-REGION FIRST ordering of a peer-list (#362): the kernel dials the list
  * in order and only the first few ICE negotiations complete inside the connect
  * window, so list order decides which links form. Stable partition: the
