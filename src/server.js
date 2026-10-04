@@ -49,7 +49,7 @@ import { BridgeAxonaNode } from './bridge_axona_node.js';
 import { startDirectoryPublisher } from './bridge_directory.js';
 import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
-import { selectAnchors }   from './anchor_select.js';
+import { selectAnchors, orderSameRegionFirst } from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
 import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
@@ -1114,6 +1114,8 @@ wss.on('connection', (ws, req) => {
     admitted: false,      // flipped to true after client-hello version check
     helloTimer: null,
     peerVersion: null,
+    claimedNodeId: null,  // hex nodeId the client-hello CLAIMS (unauthenticated; ordering hint only). Kernels at 4.102.0 send none → null
+
     meshBound: null,      // last reported live mesh size (vitality); null until first ping carries it
     meshBoundAt: 0,       // freshness stamp for meshBound
   };
@@ -1186,14 +1188,19 @@ wss.on('connection', (ws, req) => {
     // 2. Introduce the newcomer to a BOUNDED, curated anchor set (W2 nursery)
     //    rather than the full admitted list — it self-expands via the mesh.
     //    BRIDGE_NURSERY=off, or too few eligible anchors, → full list.
+    // Row 2 (Hold-and-Fill v0.5, axona-docs 4334504): regions come from the
+    // BOUND nodeId (connRegion, as graduation already does), never from the
+    // connection handle, whose first two characters are a sequence number.
+    // The newcomer's own region is the client-hello claim, or null.
+    const newcomerRegion = conn.claimedNodeId ? conn.claimedNodeId.slice(0, 2) : null;
     let admittedPeers;
     if (NURSERY_ON) {
       const cands = [];
       for (const [otherId, oc] of connections) {
-        cands.push({ id: otherId, admitted: oc.admitted, since: oc.since, anchorUses: oc.anchorUses || 0 });
+        cands.push({ id: otherId, admitted: oc.admitted, since: oc.since, anchorUses: oc.anchorUses || 0, region: connRegion(otherId) });
       }
       const sel = selectAnchors(cands, {
-        newId: id, now: Date.now(), k: ANCHOR_K,
+        newId: id, newRegion: newcomerRegion, now: Date.now(), k: ANCHOR_K,
         minUptimeMs: ANCHOR_MIN_UPTIME_MS, minPool: ANCHOR_MIN_POOL,
       });
       admittedPeers = sel.anchors;
@@ -1219,12 +1226,9 @@ wss.on('connection', (ws, req) => {
     // resolve an in-region heir — its sole-copy topics die with it or strand
     // on out-of-region holders routed reads never find (the alert-bot loss).
     // Stable partition: region-mates keep their relative order up front, the
-    // rest follow unchanged.
-    const newcomerRegion = typeof id === 'string' ? id.slice(0, 2) : '';
-    admittedPeers = [
-      ...admittedPeers.filter((p) => typeof p === 'string' && p.slice(0, 2) === newcomerRegion),
-      ...admittedPeers.filter((p) => !(typeof p === 'string' && p.slice(0, 2) === newcomerRegion)),
-    ];
+    // rest follow unchanged. Regions by bound nodeId (row 2); with the
+    // newcomer's region unknown the list keeps its order.
+    admittedPeers = orderSameRegionFirst(admittedPeers, connRegion, newcomerRegion);
     sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
 
     // 3. Tell existing admitted peers that someone new arrived.
@@ -1276,6 +1280,17 @@ wss.on('connection', (ws, req) => {
       const peerVersion = typeof msg.version === 'string' ? msg.version : null;
       conn.peerVersion = peerVersion;
       conn.kernelVersion = typeof msg.kernelVersion === 'string' ? msg.kernelVersion : null;
+      // Row 2 (Hold-and-Fill v0.5): the newcomer's keyspace region is wanted
+      // for the peer-list sent on admission, and the bridge binds the
+      // authenticated nodeId only on hello-ack, which comes AFTER that list.
+      // A client-hello that carries `nodeId` supplies the region as a CLAIM:
+      // it orders a list and chooses anchors, nothing more, and a false
+      // claim mis-orders only the claimant's own list. Kernels at 4.102.0
+      // send no nodeId; the claim is then null and no same-region affinity
+      // applies to that newcomer (before this change the affinity grouped by
+      // the connection handle's first two characters, a sequence number).
+      conn.claimedNodeId = (typeof msg.nodeId === 'string' && /^[0-9a-f]{66}$/.test(msg.nodeId))
+        ? msg.nodeId : null;
       if (!peerVersion) {
         logErr('client-hello-missing-version', { connId: id });
         try {
