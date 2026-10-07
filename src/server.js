@@ -871,6 +871,11 @@ const httpServer = http.createServer((req, res) => {
         // The WebRTC side of the degree cap. Null when no uplink or no cap —
         // which is different from a cap that is configured and idle.
         meshDegree: bridgeNode.meshDegree?.() ?? null,
+        // Bridge fill v0.8 (axona-docs 9b1ed08): the embedded peer's fill —
+        // armed or not, its cap, the kernel's last tick report, and the four
+        // counters read separately (admitted identities, bound sockets, open
+        // mesh channels, pending allocations). Operator-only like the rest.
+        fill: bridgeNode.fillStatus?.() ?? null,
         // Axonic admission + measured capacity (B2). OPERATOR-ONLY: role counts,
         // saturation and refusal tallies say where and when placement pressure
         // would succeed, which is precisely what E-1 asks us not to publish.
@@ -1033,6 +1038,7 @@ const httpServer = http.createServer((req, res) => {
       // separate mechanisms, and reading one as the node's degree is how the
       // mesh side went unbounded unnoticed.
       meshDegree: bridgeNode.meshDegree?.() ?? null,
+      fill: bridgeNode.fillStatus?.() ?? null,   // bridge fill v0.8
       // The connections list shows BOTH admitted & pending so we can
       // see peers stuck in the client-hello race or post-admit but
       // pre-handshake.

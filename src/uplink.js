@@ -52,7 +52,12 @@ function probe(url, timeoutMs = 4000) {
  * @param {string} [o.selfUrl] this bridge's own advertised url (excluded)
  * @param {(event:string, detail?:object)=>void} [o.log]
  */
-export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {} }) {
+/** The kernel's meshDegree option for a resolved cap: {maxPeers} when > 0, null (unbounded) otherwise. */
+export function meshDegreeFor(meshCap) {
+  return Number.isFinite(meshCap) && meshCap > 0 ? { maxPeers: meshCap } : null;
+}
+
+export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined }) {
   const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
   if (!upstream) return null;
 
@@ -75,8 +80,13 @@ export async function buildUplink({ identity, env = process.env, book = null, se
   // number by default — a bridge that is mediocre on one side and a full mesh
   // participant on the other is not capped, it is half-capped.
   // BRIDGE_MESH_MAX_PEERS overrides it; 0 disables the mesh cap alone.
+  // Bridge fill v0.8 (axona-docs 9b1ed08): the caller may hand in the ONE
+  // resolved cap (fill_arming.js: the legacy resolver below when the triad is
+  // off, the strict armed cap when it is on) so the fill's target and this
+  // retire threshold are the same number read once. Absent that, the resolver
+  // this file has always run.
   const wsCap   = Number.parseInt(env.BRIDGE_MAX_PEERS ?? '32', 10);
-  const meshCap = Number.parseInt(env.BRIDGE_MESH_MAX_PEERS ?? String(wsCap), 10);
+  if (meshCap === undefined) meshCap = Number.parseInt(env.BRIDGE_MESH_MAX_PEERS ?? String(wsCap), 10);
   const transport = webTransport({
     bridgeUrl: upstream,
     identity:  uplinkIdentity,
@@ -84,7 +94,7 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     reconnect: true,        // self-heal the uplink to this upstream
     // Inert when meshCap is 0 or unparseable — the kernel treats that as
     // unbounded, which is the pre-4.95.0 behaviour.
-    meshDegree: Number.isFinite(meshCap) && meshCap > 0 ? { maxPeers: meshCap } : null,
+    meshDegree: meshDegreeFor(meshCap),
     WebSocketImpl,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });

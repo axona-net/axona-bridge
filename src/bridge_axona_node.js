@@ -51,6 +51,7 @@ import { readDispatchCapability } from '@axona/protocol/registry/index.js';
 import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
+import { resolveFillArming, assertArmedModules } from './fill_arming.js';
 // NB: ./uplink.js (and its node-datachannel polyfill) is imported LAZILY inside
 // startUplink() so the native WebRTC module only loads when an uplink is actually
 // used — the testnet/uplink-off path never pays for it.
@@ -65,7 +66,7 @@ export class BridgeAxonaNode {
    * @param {(connId: string) => boolean}              opts.isConnOpen
    * @param {(event:string, data?:object) => void}     [opts.log]
    */
-  constructor({ sendToConn, isConnOpen, closeConn = null, log }) {
+  constructor({ sendToConn, isConnOpen, closeConn = null, log, env = process.env }) {
     if (typeof sendToConn !== 'function' || typeof isConnOpen !== 'function') {
       throw new TypeError('BridgeAxonaNode: sendToConn + isConnOpen required');
     }
@@ -73,6 +74,17 @@ export class BridgeAxonaNode {
     this._isConnOpen = isConnOpen;
     this._closeConn  = typeof closeConn === 'function' ? closeConn : () => {};
     this._log = log ?? (() => {});
+
+    // Bridge fill v0.8 (axona-docs 9b1ed08): arm Hold-and-Fill Rule 2 on the
+    // embedded peer from BRIDGE_SYNAPTOME_MAINTAIN / BRIDGE_ATTEMPT_GUARD /
+    // BRIDGE_ADMISSION_GATE, exactly as the relay launcher arms a relay.
+    // Resolved HERE, at construction, so a bridge configured with maintenance
+    // and no guard, or with the triad and no explicit cap, never comes up
+    // (fill_arming.js carries the refusals). All three unset — every bridge
+    // today — resolves to no options, no cap, the legacy mesh-cap resolver,
+    // and a WebSocket transport that reports nothing: byte-for-byte the
+    // behaviour before this change.
+    this._arming = resolveFillArming(env);
 
     this._identity  = null;
     this._engine    = null;
@@ -148,6 +160,7 @@ export class BridgeAxonaNode {
       sendToConn:  this._sendToConn,
       isConnOpen:  this._isConnOpen,
       log: this._log,
+      reportBound: this._arming.armed,   // bridge fill v0.8: the kernel sees socket peers only when it fills
     });
 
     // `node.transport` is a CompositeTransport so the kernel's pub/sub + routing
@@ -163,13 +176,29 @@ export class BridgeAxonaNode {
     // v0.3: AxonaPeer takes the NODE/connection identity as `nodeIdentity`
     // (was `identity`); the publish key is no longer a peer-level field —
     // authorship is supplied per-publish via { signWith } (see bridge_directory).
+    // Bridge fill v0.8: ONE CAP. When armed, the explicit BRIDGE_MESH_MAX_PEERS
+    // is the fill's target here (node._maxSynaptome, read by the kernel's
+    // _fillAvailability and _admitOrImprove) AND the uplink's meshDegree
+    // retire threshold (startUplink passes the same number). When not armed
+    // nothing is set and the kernel reads the engine's MAX_SYNAPTOME as it
+    // always has.
+    if (this._arming.armed) this._node._maxSynaptome = this._arming.cap;
     this._peer = new AxonaPeer({
       engine:       this._engine,
       node:         this._node,
       nodeIdentity: this._identity,
-      // synaptomeMaintain REVERTED to off (2026-06-29) — regressed Howard's suite.
+      // synaptomeMaintain was REVERTED to off on 2026-06-29 (2.49.0): maintenance
+      // ALONE regressed Howard's suite. Bridge fill v0.8 arms it only as the
+      // triad (maintain + guard + gate), the form the relays run; fill_arming.js
+      // refuses any other combination at construction.
+      ...this._arming.options,
     });
     await this._peer.start();
+    if (this._arming.armedEnvs.length > 0) {
+      // A version string is a claim; the peer's own state is the fact.
+      const effective = assertArmedModules(this._peer, this._arming.armedEnvs);
+      this._log('armed-modules', { envs: this._arming.armedEnvs, cap: this._arming.cap, effective });
+    }
 
     // Register peer with engine so axonaManagerFor(node) resolves
     // when peer.pub / peer.sub call _requireAxonaManager.  The
@@ -231,6 +260,7 @@ export class BridgeAxonaNode {
       const { buildUplink } = await import('./uplink.js');   // lazy: loads node-datachannel only now
       built = await buildUplink({
         identity: this._identity, env, book, selfUrl,
+        meshCap: this._arming.meshCap,   // bridge fill v0.8: the one resolved cap (legacy when not armed)
         log: (event, ctx) => this._log(`uplink:${event}`, ctx),
       });
     } catch (err) {
@@ -249,6 +279,42 @@ export class BridgeAxonaNode {
       try { await built.transport.stop?.(); } catch { /* dying */ }
       return null;
     }
+  }
+
+  /**
+   * Bridge fill v0.8: the fill report for /healthz and /diag, operator-gated
+   * by the caller. `armed`, the cap and the envs; the kernel's last tick
+   * report and its running counters as the relay logs them; and the FOUR
+   * counters the design asks to read separately, because they are four
+   * populations and not one: identities admitted (the synaptome), sockets
+   * bound at the door, open mesh channels on the uplink, allocations pending
+   * on the uplink's ledger. Null fields mean "not available here", never zero.
+   */
+  fillStatus() {
+    const peer = this._peer; const node = this._node;
+    const last = peer?._fillLast ?? null;
+    const ledger = (() => { try { return this._uplink?.transport?.channelLedgerStats?.() ?? null; } catch { return null; } })();
+    const mesh = this.meshDegree();
+    let boundSockets = null;
+    try {
+      if (typeof this._transport?.boundPeers === 'function') boundSockets = this._transport.boundPeers().length;
+      else if (this._transport?._connIdByNodeId) { let n = 0; for (const [, c] of this._transport._connIdByNodeId) if (this._isConnOpen(c)) n++; boundSockets = n; }
+    } catch { boundSockets = null; }
+    return {
+      armed:   this._arming.armed,
+      envs:    this._arming.armedEnvs,
+      cap:     this._arming.cap,
+      meshCap: this._arming.meshCap,
+      state:   peer?._fillState ?? null,
+      last:    last ? { state: last.state, cap: last.cap, admitted: last.admitted, deficit: last.deficit, inflight: last.inflight, budget: last.budget, cache: last.cache, dialed: last.dialed, cancelled: last.cancelled, near: last.near, directory: last.directory, availStop: last.availStop } : null,
+      stats:   peer?._fillStats ? { ...peer._fillStats } : null,
+      counters: {
+        admitted:           node?.synaptome?.size ?? null,
+        boundSockets,
+        meshOpen:           mesh?.open ?? null,
+        pendingAllocations: ledger?.outboundPending ?? null,
+      },
+    };
   }
 
   /** Uplink status for /healthz. */

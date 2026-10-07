@@ -38,7 +38,7 @@ export class WebSocketTransport extends Transport {
    * @param {(connId: string) => boolean} opts.isConnOpen
    * @param {(event:string, data?:object) => void} [opts.log]
    */
-  constructor({ localNodeId, sendToConn, isConnOpen, log }) {
+  constructor({ localNodeId, sendToConn, isConnOpen, log, reportBound = false }) {
     super();
     if (typeof localNodeId !== 'bigint') {
       throw new TypeError('WebSocketTransport: localNodeId must be bigint');
@@ -74,6 +74,34 @@ export class WebSocketTransport extends Transport {
     /** @type {Map<bigint, string>} */ this._connIdByNodeId = new Map();
     /** @type {Map<string, bigint>} */ this._nodeIdByConnId = new Map();
 
+    // Bridge fill v0.8 (axona-docs 9b1ed08): report this server's bound socket
+    // peers to the kernel ONLY when the embedded peer is armed to fill. With
+    // `reportBound` false (the default, every unarmed bridge) this transport
+    // has NO boundPeers and NO onPeerBound, exactly as before, so the
+    // composite's aggregate holds only the uplink's peers and the bridge
+    // admits socket peers itself in _completeHandshake as it always has. With
+    // it true the kernel's RECONCILE sees every bound socket identity and its
+    // bind event, and a socket peer the bridge's own admit refused is offered
+    // again on the next tick — the design's first step on east. The bind
+    // event names no incarnation (the socket is the channel), so the kernel
+    // ends a guard token for it by identity, as for the bridge sub-transport
+    // on a browser.
+    this._reportBound = reportBound === true;
+    if (this._reportBound) {
+      /** @type {Array<(nodeIdBig: bigint, meshId?: string, inc?: string|null) => (void|boolean)>} */
+      this._boundHandlers = [];
+      this.boundPeers = () => {
+        const out = [];
+        for (const [nodeId, connId] of this._connIdByNodeId) if (this._isConnOpen(connId)) out.push(nodeId);
+        return out;
+      };
+      this.onPeerBound = (handler) => {
+        if (typeof handler !== 'function') throw new TypeError('onPeerBound: handler must be a function');
+        this._boundHandlers.push(handler);
+        return () => { const i = this._boundHandlers.indexOf(handler); if (i >= 0) this._boundHandlers.splice(i, 1); };
+      };
+    }
+
     this._started = false;
   }
 
@@ -100,6 +128,13 @@ export class WebSocketTransport extends Transport {
     if (typeof connId !== 'string') throw new TypeError('connId must be string');
     this._connIdByNodeId.set(nodeId, connId);
     this._nodeIdByConnId.set(connId, nodeId);
+    // Bridge fill v0.8: the bind event, when reporting (see constructor). The
+    // connId stands as the channel id; there is no incarnation on a socket.
+    if (this._reportBound) {
+      for (const h of this._boundHandlers) {
+        try { h(nodeId, connId, null); } catch (err) { this._log('peer-bound-handler-threw', { err: err?.message }); }
+      }
+    }
   }
 
   unbindPeer(connId) {
