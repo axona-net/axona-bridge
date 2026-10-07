@@ -179,6 +179,11 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     const [c0, id0] = ids[0];
     await node.transport.closeConnection(id0);
     check('G7 a direct closeConnection on the armed door keeps the binding (retained) and never closes the socket', node.transport.connIdFor(id0) === c0 && open.has(c0));
+    // G10 the socket actually closes: the bridge's conn-closed feed unbinds, the peer leaves boundPeers, and the kernel drops it.
+    const [c1, id1] = ids.find(([, id]) => syn.has(id)) ?? ids[0];
+    open.delete(c1); node.handleConnClosed(c1); await new Promise(r => setTimeout(r, 20));
+    check('G10 physical close (handleConnClosed): unbound at the door, out of boundPeers, out of the synaptome, handshake state cleared',
+      node.transport.connIdFor(id1) === null && !node.transport.boundPeers().includes(id1) && !syn.has(id1) && node._helloByConnId.get(c1) === undefined, `conn=${node.transport.connIdFor(id1)} syn=${syn.has(id1)}`);
     await node.stop();
 
     // Unarmed: the door does not report, and a close unbinds as it always has.
@@ -201,9 +206,14 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     const node = new BridgeAxonaNode({ sendToConn: () => true, isConnOpen: (c) => open.has(c), log: () => {}, env: { ...TRIAD, BRIDGE_MESH_MAX_PEERS: '6', BRIDGE_MAX_PEERS: '15' } });
     await node.start();
     const peer = node.peer; if (peer._maintainTimer) { clearInterval(peer._maintainTimer); peer._maintainTimer = null; }
+    const kv = JSON.parse(readFileSync(join(HERE, '..', 'node_modules', '@axona', 'protocol', 'package.json'), 'utf8')).version ?? '0.0.0';   // the installed kernel, as check_kernel_pin reads it
+    const [kM, km] = String(kv).split('.').map(Number);
+    const expectsDialer = kM > 4 || (kM === 4 && km >= 106);   // 4.106.0 carries composite-dialer
     if (typeof node._composite.dialer !== 'function') {
-      console.log('  · H skipped: the pinned kernel has no composite dialer (needs 4.106.0+); the composite-dialer fence in the kernel covers the dial path');
+      if (expectsDialer) check(`H0 the pinned kernel ${kv} is expected to carry the composite dialer and does not`, false);
+      else console.log(`  · H skipped: the pinned kernel ${kv} predates the composite dialer (4.106.0); on that pin the kernel's own fence covers the dial path`);
     } else {
+      check(`H0 the pinned kernel ${kv} carries the composite dialer`, true);
       // A stub uplink: the dialer. It owns nothing, dials on request, binds when told.
       const { Transport } = await import('@axona/protocol/contracts/Transport.js');
       const { depositDispatchCapability } = await import('@axona/protocol/registry/index.js');
