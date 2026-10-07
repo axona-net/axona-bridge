@@ -61,7 +61,9 @@ export class DirectoryFeed extends Transport {
     this._log = log;
     this._random = random;
     this._handlers = new Set();
-    this.stats = { requests: 0, unavailable: 0, served: 0, lastPool: 0, lastSample: 0, lastAt: 0 };
+    this._pending = new Set();      // deferred deliveries not yet fired (cancelled by stop)
+    this._generation = 0;           // bumped by stop; a delivery from an older generation does not fire
+    this.stats = { requests: 0, unavailable: 0, served: 0, failed: 0, lastPool: 0, lastSample: 0, lastAt: 0 };
     // The composite fans request/notification handlers onto every sub through
     // its deposited capability and throws on an undeposited one; this feed
     // carries no frames, so both closures accept and drop.
@@ -84,8 +86,12 @@ export class DirectoryFeed extends Transport {
   request() {
     this.stats.requests++;
     if (!this._source) { this.stats.unavailable++; return false; }
-    let pool = [];
-    try { pool = this._source() ?? []; } catch { pool = []; }
+    // DF-1 (Aster 26503fb7): a source that throws or returns a non-array is a
+    // FAILED evaluation, reported to the kernel as unavailable (false), never
+    // as a confirmed empty supply. Only a real array is an answer.
+    let pool;
+    try { pool = this._source(); } catch (err) { this.stats.unavailable++; this.stats.failed++; this._log('directory-feed-source-threw', { err: err?.message }); return false; }
+    if (!Array.isArray(pool)) { this.stats.unavailable++; this.stats.failed++; this._log('directory-feed-source-malformed', { type: typeof pool }); return false; }
     const seen = new Set();
     const cand = [];
     for (const p of pool) {
@@ -102,16 +108,31 @@ export class DirectoryFeed extends Transport {
     const sample = cand.slice(0, this._sampleSize);
     this.stats.served++; this.stats.lastPool = cand.length; this.stats.lastSample = sample.length; this.stats.lastAt = Date.now();
     this._log('directory-feed', { pool: cand.length, sample: sample.length });
-    const handlers = [...this._handlers];
+    // DF-2 (Aster 26503fb7): delivery is deferred to the next turn, but the
+    // handlers are read AT FIRE TIME from the live set — a handler that
+    // unsubscribed in between (the kernel's stop does) is not called — and a
+    // stop() before the turn cancels the delivery outright (the timer is
+    // cleared and the generation no longer matches).
+    const gen = this._generation;
     const t = setTimeout(() => {
-      for (const h of handlers) { try { h(sample); } catch (err) { this._log('directory-feed-handler-threw', { err: err?.message }); } }
+      this._pending.delete(t);
+      if (gen !== this._generation) return;
+      for (const h of [...this._handlers]) { try { h(sample); } catch (err) { this._log('directory-feed-handler-threw', { err: err?.message }); } }
     }, 0);
     t.unref?.();
+    this._pending.add(t);
     return true;
   }
 
   // ── Transport contract: a peer-less sub-transport ────────────────────
-  async start() {} async stop() {}
+  async start() {}
+  async stop() {
+    // Cancel every deferred delivery and invalidate any that already left the
+    // timer queue; a later start() serves new requests under the new generation.
+    this._generation++;
+    for (const t of this._pending) clearTimeout(t);
+    this._pending.clear();
+  }
   getLocalNodeId() { return null; }
   isConnected() { return false; }
   async openConnection() { return false; }

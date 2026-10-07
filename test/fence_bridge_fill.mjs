@@ -287,6 +287,25 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     feed.setSource(() => []);
     feed.request(); await new Promise((res) => setTimeout(res, 5));
     check('I5 an empty pool is an ANSWER: true, an empty list delivered', got.length === 2 && got[1].length === 0);
+    // DF-1: a throwing or malformed source is UNAVAILABLE, not an empty answer.
+    const n5 = got.length; const u5 = feed.stats.unavailable;
+    feed.setSource(() => { throw new Error('boom'); });
+    const rt = feed.request(); await new Promise((res) => setTimeout(res, 5));
+    feed.setSource(() => ({ not: 'an array' }));
+    const rm = feed.request(); await new Promise((res) => setTimeout(res, 5));
+    check('I5b a throwing source → false, unavailable +1, failed +1, NOTHING delivered; a non-array result the same', rt === false && rm === false && got.length === n5 && feed.stats.unavailable === u5 + 2 && feed.stats.failed === 2, JSON.stringify(feed.stats));
+    // DF-2: deferred delivery respects unsubscribe and stop.
+    feed.setSource(() => pool);
+    const late = []; const unsubLate = feed.onPeerList((l) => late.push(l));
+    feed.request(); unsubLate();                       // request, then unsubscribe BEFORE the turn
+    await new Promise((res) => setTimeout(res, 5));
+    check('I5c a handler that unsubscribed after the request and before the turn is NOT called (the live set is read at fire time)', late.length === 0 && got.length === n5 + 1);
+    const n5c = got.length;
+    feed.request(); await feed.stop();                 // request, then stop BEFORE the turn
+    await new Promise((res) => setTimeout(res, 5));
+    check('I5d stop() before the turn cancels the pending delivery', got.length === n5c);
+    await feed.start(); feed.request(); await new Promise((res) => setTimeout(res, 5));
+    check('I5e after start() a new request is served under the new generation', got.length === n5c + 1);
 
     // Through the node: unarmed has no feed and no requestPeerIntroductions.
     const open = new Set();
@@ -331,6 +350,10 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
       check('I10 the next tick dialled the sampled identities through the one dialer (maxPerTick 3)', up.relay.length === 3 && up.relay.every((h) => strangers.includes(h)), `relay=${up.relay.length}`);
       const fs = node.fillStatus();
       check('I11 fillStatus carries the feed\'s stats (requests ≥ 1, served ≥ 1, lastSample 5)', fs.directory && fs.directory.requests >= 1 && fs.directory.served >= 1 && fs.directory.lastSample === 5, JSON.stringify(fs.directory));
+      node.setDirectorySource(() => { throw new Error('source down'); });
+      peer._fillDirectoryNextAt = 0; peer._deficitBackoff?.reset?.();
+      await peer._maintainSynaptome(); await new Promise((res) => setTimeout(res, 10));
+      check('I12 through the kernel: a throwing source leaves the directory state UNAVAILABLE (not answered) and counts directoryUnavailable', peer._fillDirectory.state === 'unavailable' && peer._fillStats.directoryUnavailable >= 1, JSON.stringify(peer._fillDirectory));
     }
     await node.stop();
   }
