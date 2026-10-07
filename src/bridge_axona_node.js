@@ -52,6 +52,7 @@ import { BridgeEngine }       from './bridge_engine.js';
 import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
 import { resolveFillArming, assertArmedModules } from './fill_arming.js';
+import { DirectoryFeed } from './directory_feed.js';
 // NB: ./uplink.js (and its node-datachannel polyfill) is imported LAZILY inside
 // startUplink() so the native WebRTC module only loads when an uplink is actually
 // used — the testnet/uplink-off path never pays for it.
@@ -168,6 +169,19 @@ export class BridgeAxonaNode {
     // uplink (added later by startUplink). One peer, one connectome.
     this._composite = new CompositeTransport({ localNodeId: this._identity.id, log: this._log });
     this._composite.addSubtransport(this._transport);
+    // Bridge fill v0.8, the DIRECTORY step on a bridge (directory_feed.js):
+    // only when armed. The feed is a peer-less sub-transport whose
+    // onPeerList the composite fans the kernel's handler onto; its request()
+    // is installed on the composite as requestPeerIntroductions, which the
+    // kernel's fill calls every T while below cap. The server hands in the
+    // candidate source (setDirectorySource). Unarmed: nothing is added and
+    // the composite has no requestPeerIntroductions, exactly as before.
+    this._directoryFeed = null;
+    if (this._arming.armed) {
+      this._directoryFeed = new DirectoryFeed({ selfHex: this._identity.idHex, log: this._log });
+      this._composite.addSubtransport(this._directoryFeed);
+      this._composite.requestPeerIntroductions = () => this._directoryFeed.request();
+    }
     this._node.transport = this._composite;
     await this._composite.start(this._identity.id);
 
@@ -308,6 +322,7 @@ export class BridgeAxonaNode {
       state:   peer?._fillState ?? null,
       last:    last ? { state: last.state, cap: last.cap, admitted: last.admitted, deficit: last.deficit, inflight: last.inflight, budget: last.budget, cache: last.cache, dialed: last.dialed, cancelled: last.cancelled, near: last.near, directory: last.directory, availStop: last.availStop } : null,
       stats:   peer?._fillStats ? { ...peer._fillStats } : null,
+      directory: this._directoryFeed ? { ...this._directoryFeed.stats } : null,
       counters: {
         admitted:           node?.synaptome?.size ?? null,
         boundSockets,
@@ -316,6 +331,13 @@ export class BridgeAxonaNode {
       },
     };
   }
+
+  /**
+   * Bridge fill v0.8: the directory feed's candidate source — a function
+   * returning hex nodeIds this bridge knows of (the server supplies admitted
+   * bound sockets plus recently graduated peers). No-op when not armed.
+   */
+  setDirectorySource(fn) { this._directoryFeed?.setSource(fn); }
 
   /** Uplink status for /healthz. */
   uplinkStatus() {

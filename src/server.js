@@ -645,6 +645,17 @@ const bridgeNode = new BridgeAxonaNode({
   log: (event, detail) => logDebug(`axona:${event}`, detail),
 });
 await bridgeNode.start();
+// Bridge fill v0.8: the directory feed's source — every admitted socket that has
+// bound an identity, plus every peer graduated off this door recently (it left
+// the socket to live in the mesh; it is exactly a peer the bridge knows of and
+// is not connected to). The kernel's cache refuses identities it already holds,
+// so the bound ones cost one refused nomination each. No-op when not armed.
+bridgeNode.setDirectorySource?.(() => {
+  const out = [];
+  for (const [cid, c] of connections) { if (c.admitted) { const nh = connNodeHex(cid); if (nh) out.push(nh); } }
+  for (const nh of graduatedRecently.keys()) out.push(nh);
+  return out;
+});
 log('axona-ready', {
   nodeId: idToHex(bridgeNode.nodeId),
   region: bridgeNode.identity.region.label,

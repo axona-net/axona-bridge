@@ -260,6 +260,81 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     await node.stop();
   }
 
+  // ── I. the DIRECTORY feed: a bridge is the directory ────────────────────
+  // The kernel asks transport.requestPeerIntroductions() and takes the answer
+  // through onPeerList. On a bridge the feed serves a sample of the bridge's
+  // own identities (admitted bound sockets + recently graduated peers), self
+  // excluded, at most R_SAMPLE, delivered on the next turn so the kernel
+  // records 'sent' then 'answered' (R12-3). Armed only.
+  {
+    const { DirectoryFeed, R_SAMPLE } = await import('../src/directory_feed.js');
+    const self = '89' + 'ab'.repeat(32);
+    const hex = (k) => '89' + k.toString(16).padStart(64, '0');
+    const feed = new DirectoryFeed({ selfHex: self, random: () => 0.5 });
+    const got = []; feed.onPeerList((l) => got.push(l));
+    check('I1 no source → request() returns false, nothing delivered, unavailable counted', feed.request() === false && got.length === 0 && feed.stats.unavailable === 1);
+    const pool = Array.from({ length: 40 }, (_, k) => hex(k + 1));
+    feed.setSource(() => [...pool, self, pool[0], 'not-hex', 'AB'.repeat(33)]);
+    const r = feed.request();
+    const deliveredBefore = got.length;
+    await new Promise((res) => setTimeout(res, 5));
+    check('I2 with a source: true, and the sample is delivered AFTER request() returned (next turn), not inside it', r === true && deliveredBefore === 0 && got.length === 1);
+    const sample = got[0];
+    check(`I3 at most R_SAMPLE (${R_SAMPLE}) identities, self excluded, duplicates and non-hex dropped, all 66-hex lower-case`,
+      sample.length === R_SAMPLE && !sample.includes(self) && new Set(sample).size === sample.length && sample.every((h) => /^[0-9a-f]{66}$/.test(h)),
+      `n=${sample.length}`);
+    check('I4 stats: requests 2, served 1, lastPool 41 (40 + the upper-cased one; self and the duplicate dropped), lastSample 16', feed.stats.requests === 2 && feed.stats.served === 1 && feed.stats.lastPool === 41 && feed.stats.lastSample === R_SAMPLE, JSON.stringify(feed.stats));
+    feed.setSource(() => []);
+    feed.request(); await new Promise((res) => setTimeout(res, 5));
+    check('I5 an empty pool is an ANSWER: true, an empty list delivered', got.length === 2 && got[1].length === 0);
+
+    // Through the node: unarmed has no feed and no requestPeerIntroductions.
+    const open = new Set();
+    const quiet = new BridgeAxonaNode({ sendToConn: () => true, isConnOpen: (c) => open.has(c), log: () => {}, env: { BRIDGE_MAX_PEERS: '15', BRIDGE_MESH_MAX_PEERS: '0' } });
+    await quiet.start();
+    check('I6 unarmed: no requestPeerIntroductions on the composite, no feed, fillStatus.directory null', typeof quiet._composite.requestPeerIntroductions === 'undefined' && quiet._directoryFeed === null && quiet.fillStatus().directory === null);
+    await quiet.stop();
+
+    // Armed, through the real kernel with a stub dialer: the directory step
+    // sends, the answer lands, the cache fills, the dials go to sampled ids.
+    const node = new BridgeAxonaNode({ sendToConn: () => true, isConnOpen: (c) => open.has(c), log: () => {}, env: { ...TRIAD, BRIDGE_MESH_MAX_PEERS: '12', BRIDGE_MAX_PEERS: '15' } });
+    await node.start();
+    const peer = node.peer; if (peer._maintainTimer) { clearInterval(peer._maintainTimer); peer._maintainTimer = null; }
+    check('I7 armed: requestPeerIntroductions installed on the composite and the feed is a sub-transport', typeof node._composite.requestPeerIntroductions === 'function' && node._composite._subs.includes(node._directoryFeed));
+    if (typeof node._composite.dialer !== 'function') {
+      console.log('  · I8–I10 need the composite-dialer kernel; skipped on this pin');
+    } else {
+      const { Transport } = await import('@axona/protocol/contracts/Transport.js');
+      const { depositDispatchCapability } = await import('@axona/protocol/registry/index.js');
+      class StubUplink extends Transport {
+        constructor() { super(); this.relay = []; depositDispatchCapability(this, { request: () => {}, notification: () => {} }); }
+        async start() {} async stop() {} getLocalNodeId() { return 0n; }
+        async openConnection() { return false; } async closeConnection() {}
+        isConnected() { return false; } async send() { throw new Error('stub'); } async notify() {}
+        onPeerDied() { return () => {}; } getLatency() { return 20; }
+        boundPeers() { return []; } onPeerBound() { return () => {}; }
+        connectViaRelay(h) { this.relay.push(h); return 'inc-' + this.relay.length; }
+        mayDial() { return true; }
+      }
+      const up = new StubUplink(); node._composite.addSubtransport(up);
+      const strangers = [1, 2, 3, 4, 5].map((k) => (node.nodeId ^ (1n << BigInt(80 + k))).toString(16).padStart(66, '0'));
+      node.setDirectorySource(() => strangers);
+      peer._fillDirectoryNextAt = 0; peer._deficitBackoff?.reset?.();
+      await peer._maintainSynaptome();
+      const d1 = { ...peer._fillDirectory };
+      await new Promise((res) => setTimeout(res, 10));
+      const d2 = { ...peer._fillDirectory };
+      check('I8 the tick\'s directory step SENT through the feed (state sent right after the tick), and the answer landed on the next turn (answered, offered 5)', d1.state === 'sent' && d2.state === 'answered' && d2.offered === 5, JSON.stringify({ d1, d2 }));
+      check('I9 the five strangers were nominated into the cache', peer._fillCache.size === 5 && peer._fillStats.nominated >= 5, `cache=${peer._fillCache.size} nominated=${peer._fillStats.nominated}`);
+      peer._deficitBackoff?.reset?.();
+      await peer._maintainSynaptome();
+      check('I10 the next tick dialled the sampled identities through the one dialer (maxPerTick 3)', up.relay.length === 3 && up.relay.every((h) => strangers.includes(h)), `relay=${up.relay.length}`);
+      const fs = node.fillStatus();
+      check('I11 fillStatus carries the feed\'s stats (requests ≥ 1, served ≥ 1, lastSample 5)', fs.directory && fs.directory.requests >= 1 && fs.directory.served >= 1 && fs.directory.lastSample === 5, JSON.stringify(fs.directory));
+    }
+    await node.stop();
+  }
+
   // ── E. one cap into the uplink ───────────────────────────────────────────
   {
     const { meshDegreeFor } = await import('../src/uplink.js');
