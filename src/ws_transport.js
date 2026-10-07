@@ -155,7 +155,27 @@ export class WebSocketTransport extends Transport {
 
   async closeConnection(nodeId) {
     const connId = this._connIdByNodeId.get(nodeId);
-    if (connId) this.unbindPeer(connId);
+    if (!connId) return;
+    // Bridge fill v0.8, the RETAINED-BINDING disposition (Vega 5ca291ea /
+    // 761ed13b, Aster BF-CODE-1). When this door reports its bound peers to
+    // the kernel, the kernel's admission gate may refuse one and call this to
+    // "close the just-bound channel". The channel is a WebSocket the DOOR
+    // owns: it serves the peer's bootstrap (introductions, relayed
+    // signalling) whether or not the bridge's own synaptome admits the peer,
+    // and the door's own graduation bounds that population. So the socket is
+    // never closed here, and the binding is KEPT: the peer stays bound and
+    // out of the table, which is exactly the state the kernel's RECONCILE
+    // (AxonaPeer._reconcileBound) offers again on the next tick, and the
+    // state a duty-blocked refusal leaves anyway (the kernel never reaches
+    // this call for one). Unbinding without closing, which is what the
+    // unarmed path below has always done, would leave a handshake-complete
+    // socket that is in no map: not in boundPeers, unreachable by send, and
+    // never re-offered — an orphan. The unarmed door keeps its behaviour:
+    // the kernel never sees its peers, and a close from the bridge's own
+    // paths unbinds as before. The socket itself closes only through
+    // handleConnClosed, when the WebSocket actually closes.
+    if (this._reportBound) { this._log('close-retained', { connId }); return; }
+    this.unbindPeer(connId);
   }
 
   isConnected(nodeId) {

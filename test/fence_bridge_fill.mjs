@@ -42,6 +42,7 @@ import { BridgeAxonaNode } from '../src/bridge_axona_node.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
+const J = (v) => JSON.stringify(v, (k, x) => (typeof x === 'bigint' ? x.toString(16).slice(0, 8) : x));
 const throwsWith = (fn, re) => { try { fn(); return false; } catch (e) { return re.test(String(e && e.message)); } };
 const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDGE_ADMISSION_GATE: '1' };
 
@@ -136,6 +137,117 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     // D3 MAINTAIN alone: refuses at construction
     check('D3 MAINTAIN alone refuses AT CONSTRUCTION (nothing built)', throwsWith(() => mkNode({ BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_MESH_MAX_PEERS: '50' }), /arming refused: BRIDGE_SYNAPTOME_MAINTAIN=1 set without/));
     check('D4 the triad with no cap refuses AT CONSTRUCTION', throwsWith(() => mkNode({ ...TRIAD }), /the fill triad is set but BRIDGE_MESH_MAX_PEERS is absent/));
+  }
+
+  // ── G. the refusal path on a real bridge + kernel: RETAINED binding ─────
+  // Vega 5ca291ea / 761ed13b, Aster BF-CODE-1: when armed, bindPeer fires the
+  // kernel's bind handler; the gate may refuse and call closeConnection on the
+  // door. Before this fence the door unbound without closing — an orphan
+  // socket, handshake-complete, in no map. Now the binding is RETAINED: the
+  // peer stays bound, out of the table, reachable, and RECONCILE re-offers it.
+  {
+    const open = new Set();
+    const mkNode = (env) => new BridgeAxonaNode({ sendToConn: () => true, isConnOpen: (c) => open.has(c), log: () => {}, env });
+    // cap 4 with the relay's kJoin 2: two ordinary slots, then the join lane
+    // (one lane admission per 5 s cooldown), so five fast handshakes end with
+    // AT MOST four admitted and at least one refused.
+    const node = mkNode({ ...TRIAD, BRIDGE_MESH_MAX_PEERS: '4', BRIDGE_MAX_PEERS: '15' });
+    await node.start();
+    const peer = node.peer; if (peer._maintainTimer) { clearInterval(peer._maintainTimer); peer._maintainTimer = null; }
+    const ids = [];
+    for (let i = 1; i <= 5; i++) { const c = `g${i}`; open.add(c); const id = (node.nodeId ^ (1n << BigInt(40 + i))); ids.push([c, id]); await node._completeHandshake(c, id); }
+    const syn = node._node.synaptome;
+    const admitted = ids.filter(([, id]) => syn.has(id)).length;
+    const refused  = ids.filter(([, id]) => !syn.has(id));
+    check('G1 five fast handshakes on a bridge armed at cap 4: at most 4 admitted, at least 1 refused', admitted <= 4 && refused.length >= 1, `admitted=${admitted} refused=${refused.length} syn=${syn.size}`);
+    check('G2 EVERY refused peer is still bound at the door (connIdFor, isConnected, in boundPeers): no orphan', refused.every(([c, id]) => node.transport.connIdFor(id) === c && node.transport.isConnected(id) && node.transport.boundPeers().includes(id)), J(refused.map(([c]) => c)));
+    check('G3 and its handshake stays complete (a second hello is a no-op, not an orphan)', refused.every(([c]) => node._helloByConnId.get(c) === 'complete'));
+    const before = peer._reconcileLast;
+    peer._reconcileBound();
+    const rl = peer._reconcileLast;
+    check('G4 RECONCILE sees the retained identities as bound and offers them again (bound = 5 sockets, offered ≥ refused)', rl.bound === 5 && rl.offered >= refused.length, J(rl));
+    check('G5 reconcile dialled nothing: the composite\'s open is bound-only and the door never dials', typeof node.transport.connectViaRelay === 'undefined');
+    // Free room BELOW the operational table (cap 4 − kJoin 2 = 2): the gate's
+    // join lane is time-paced (one lane admission per 5 s) and the fence is
+    // not, so the retained peers must re-enter through the ordinary path.
+    for (const [, id] of ids.filter(([, id]) => syn.has(id)).slice(0, 3)) syn.delete(id);
+    check('G6a setup: table at 1, below cap − kJoin', syn.size === 1);
+    peer._reconcileBound();
+    const rl2 = peer._reconcileLast;
+    check('G6 with room, a reconcile admits retained peers with zero dials (admitted ≥ 1) and the table does not exceed the cap', rl2.admitted >= 1 && syn.size <= 4 && syn.size > 1, J(rl2) + ` syn=${syn.size}`);
+    // The kernel's own close on a socket peer: retained too (the eviction path at AxonaPeer.js:5352 goes through the same method).
+    const [c0, id0] = ids[0];
+    await node.transport.closeConnection(id0);
+    check('G7 a direct closeConnection on the armed door keeps the binding (retained) and never closes the socket', node.transport.connIdFor(id0) === c0 && open.has(c0));
+    await node.stop();
+
+    // Unarmed: the door does not report, and a close unbinds as it always has.
+    const quiet = mkNode({ BRIDGE_MAX_PEERS: '15', BRIDGE_MESH_MAX_PEERS: '0' });
+    await quiet.start();
+    open.add('q1'); const qid = quiet.nodeId ^ (1n << 50n);
+    await quiet._completeHandshake('q1', qid);
+    check('G8 unarmed: the handshake admits through the bridge\'s own path as before (synaptome has the peer; the door has no boundPeers)', quiet._node.synaptome.has(qid) && typeof quiet.transport.boundPeers === 'undefined');
+    await quiet.transport.closeConnection(qid);
+    check('G9 unarmed: closeConnection unbinds, exactly today\'s behaviour', quiet.transport.connIdFor(qid) === null);
+    await quiet.stop();
+  }
+
+  // ── H. DIAL through the one dialer (needs the composite-dialer kernel) ──
+  // Runs only against a kernel whose CompositeTransport names a dialer
+  // (axona-protocol composite-dialer / 4.106.0+); on 4.105.0 it is reported
+  // as skipped, not passed.
+  {
+    const open = new Set();
+    const node = new BridgeAxonaNode({ sendToConn: () => true, isConnOpen: (c) => open.has(c), log: () => {}, env: { ...TRIAD, BRIDGE_MESH_MAX_PEERS: '6', BRIDGE_MAX_PEERS: '15' } });
+    await node.start();
+    const peer = node.peer; if (peer._maintainTimer) { clearInterval(peer._maintainTimer); peer._maintainTimer = null; }
+    if (typeof node._composite.dialer !== 'function') {
+      console.log('  · H skipped: the pinned kernel has no composite dialer (needs 4.106.0+); the composite-dialer fence in the kernel covers the dial path');
+    } else {
+      // A stub uplink: the dialer. It owns nothing, dials on request, binds when told.
+      const { Transport } = await import('@axona/protocol/contracts/Transport.js');
+      const { depositDispatchCapability } = await import('@axona/protocol/registry/index.js');
+      class StubUplink extends Transport {
+        constructor() { super(); this.relay = []; this.bound = new Set(); this.boundHandlers = []; depositDispatchCapability(this, { request: () => {}, notification: () => {} }); }
+        async start() {} async stop() {} getLocalNodeId() { return 0n; }
+        async openConnection(id) { return this.bound.has(id); } async closeConnection() {}
+        isConnected(id) { return this.bound.has(id); }
+        async send() { throw new Error('stub'); } async notify() {}
+        onPeerDied() { return () => {}; } getLatency() { return 20; }
+        boundPeers() { return [...this.bound]; }
+        onPeerBound(h) { this.boundHandlers.push(h); return () => {}; }
+        connectViaRelay(hex) { this.relay.push(hex); const inc = 'inc-' + this.relay.length; (this.incByHex ??= new Map()).set(hex, inc); return inc; }
+        mayDial() { return true; }
+        // The bind carries the incarnation THIS peer's dial returned (R8-2: the
+        // kernel rejects a bind on any other incarnation as stale).
+        bind(id) { this.bound.add(id); const hex = id.toString(16).padStart(66, '0'); const inc = this.incByHex?.get(hex) ?? null; for (const h of this.boundHandlers) h(id, 'm' + hex.slice(-4), inc); }
+      }
+      const up = new StubUplink(); node._composite.addSubtransport(up);
+      check('H1 the stub uplink is the bridge composite\'s one dialer', node._composite.dialer() === up && typeof node._composite.connectViaRelay === 'function');
+      // Two socket peers at the door, admitted on handshake.
+      for (let i = 1; i <= 2; i++) { const c = `h${i}`; open.add(c); await node._completeHandshake(c, node.nodeId ^ (1n << BigInt(60 + i))); }
+      const syn = node._node.synaptome;
+      const sockets0 = node.transport.boundPeers().length;
+      check('H2 two sockets admitted with zero dials (sockets 2, admitted 2, relay 0)', sockets0 === 2 && syn.size === 2 && up.relay.length === 0);
+      // Nominate four strangers and tick: the deficit (6 − 2) is closed by DIAL through the dialer only.
+      const strangers = [1, 2, 3, 4].map(k => node.nodeId ^ (1n << BigInt(70 + k)));
+      for (const s of strangers) peer._nominateCandidate(s, 'fence');
+      peer._deficitBackoff?.reset?.();
+      await peer._maintainSynaptome();
+      const fs = node.fillStatus();
+      check('H3 the tick dialled through the dialer (relay > 0, each a nominated stranger), sockets unchanged, nothing admitted yet', up.relay.length > 0 && up.relay.length <= 3 && node.transport.boundPeers().length === 2 && syn.size === 2, `relay=${up.relay.length} syn=${syn.size} state=${fs.state}`);
+      // Binds arrive: admitted rises by one per bind; sockets never change.
+      const dialled = strangers.filter(s => up.relay.some(h => BigInt('0x' + h) === s));
+      // A bind on a STALE incarnation first: rejected, nothing admitted (R8-2 through the real composite).
+      const first = dialled[0]; const synBefore = syn.size;
+      for (const h of up.boundHandlers) h(first, 'mstale', 'inc-stale');
+      check('H4a a bind carrying a stale incarnation is rejected: admitted unchanged', syn.size === synBefore);
+      for (const s of dialled) up.bind(s);
+      check('H4 each bind with its own incarnation raises admitted by one; sockets stay 2', syn.size === 2 + dialled.length && node.transport.boundPeers().length === 2, `syn=${syn.size} dialled=${dialled.length}`);
+      const fs2 = node.fillStatus();
+      check('H5 fillStatus reports the four counters apart: admitted, boundSockets 2, meshOpen null (stub has no degree stats), pending null', fs2.counters.admitted === syn.size && fs2.counters.boundSockets === 2 && fs2.counters.meshOpen === null && fs2.counters.pendingAllocations === null, J(fs2.counters));
+    }
+    await node.stop();
   }
 
   // ── E. one cap into the uplink ───────────────────────────────────────────
