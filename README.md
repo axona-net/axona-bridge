@@ -208,6 +208,12 @@ default here as a claim to check against the code, not the reverse.
 | `BRIDGE_MAX_PEERS` | `32` | admitted connections held before graduation begins. Production east runs `15` |
 | `BRIDGE_MESH_MAX_PEERS` | `= BRIDGE_MAX_PEERS` | the same bound on the bridge's own WebRTC mesh degree, so a bridge is not capped on one side and unbounded on the other. `0` disables the mesh cap alone; the production bridges' `/diag` reads `meshDegree.cap: 0` |
 | **Graduation** (close 4200 — "you are meshed; freeing the bridge slot") | | |
+| `BRIDGE_SOCKET_IS_BOOTSTRAP` | unset (off) | 2.152.0, kernel ≥ 4.107.0. ON: the door advertises a reserved id for the bridge itself first in every peer-list; a newcomer's WebRTC channel to the bridge replaces its socket (closed with 4200 once the channel has bound and a fresh `meshBound` ≥ the safe floor); at the mesh cap an eligible newcomer's bind retires one incumbent. Off: byte-identical to 2.151.0. Refuses to start a mesh on a kernel pin without the surfaces |
+| `BRIDGE_PROVISIONAL_MAX` | `20` | with the flag on: open door channels whose identity has not bound; the newest above it is retired |
+| `BRIDGE_BIND_DEADLINE_MS` | `15000` | with the flag on: an open door channel still unbound after this is retired |
+| `BRIDGE_MAKE_ROOM_PER_MIN` | `4` | with the flag on: incumbent retires per sliding minute; above it a newcomer at cap is refused as a relay refuses |
+| `BRIDGE_SOCKET_BOOTSTRAP_MIN_KERNEL` | `4.107.0` | with the flag on: clients below this kernel are never offered the reserved id |
+| `BRIDGE_SOCKET_BOOTSTRAP_COOLDOWN_MS` | `60000` | with the flag on: a retired identity is refused a bind, and its connection a new negotiation to the reserved id, for this long |
 | `BRIDGE_GRADUATION_MIN_UPTIME_MS` | `30000` | a peer must be this old before it can be graduated |
 | `BRIDGE_GRADUATION_MIN_KERNEL` | `4.35.0` | only clients that honour close 4200 are graduated; older ones count toward the cap and are never dropped |
 | `BRIDGE_GRADUATION_SAFE_FLOOR` | `4` | minimum reported `meshBound` to be eligible — one above the client's own floor of 3 |
