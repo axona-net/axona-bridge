@@ -363,7 +363,8 @@ const TRIAD = { BRIDGE_SYNAPTOME_MAINTAIN: '1', BRIDGE_ATTEMPT_GUARD: '1', BRIDG
     const { meshDegreeFor } = await import('../src/uplink.js');
     check('E1 meshDegreeFor(50) = {maxPeers: 50}; meshDegreeFor(0) and NaN = null', meshDegreeFor(50)?.maxPeers === 50 && meshDegreeFor(0) === null && meshDegreeFor(NaN) === null);
     const src = readFileSync(join(HERE, '..', 'src', 'uplink.js'), 'utf8');
-    check('E2 buildUplink takes `meshCap` and computes the legacy expression only when it is undefined', /meshCap = undefined \}\)/.test(src) && /if \(meshCap === undefined\) meshCap = Number\.parseInt\(env\.BRIDGE_MESH_MAX_PEERS \?\? String\(wsCap\), 10\);/.test(src) && /meshDegree: meshDegreeFor\(meshCap\),/.test(src));
+    // Socket-is-bootstrap v0.5 adds a `meshOnly` parameter after meshCap; the cap contract is unchanged.
+    check('E2 buildUplink takes `meshCap` and computes the legacy expression only when it is undefined', /meshCap = undefined(, meshOnly = false)? \}\)/.test(src) && /if \(meshCap === undefined\) meshCap = Number\.parseInt\(env\.BRIDGE_MESH_MAX_PEERS \?\? String\(wsCap\), 10\);/.test(src) && /meshDegree: meshDegreeFor\(meshCap\),/.test(src));
     const node = readFileSync(join(HERE, '..', 'src', 'bridge_axona_node.js'), 'utf8');
     check('E3 startUplink passes the ONE resolved cap (this._arming.meshCap) to buildUplink', /meshCap: this\._arming\.meshCap/.test(node));
     check('E4 the node sets _maxSynaptome from the same resolution, only when armed', /if \(this\._arming\.armed\) this\._node\._maxSynaptome = this\._arming\.cap;/.test(node));

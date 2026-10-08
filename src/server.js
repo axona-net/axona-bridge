@@ -622,6 +622,35 @@ function maybeGraduate() {
 // on-admit check — one graduation per interval until back within band.
 setInterval(maybeGraduate, GRADUATION_INTERVAL_MS).unref?.();
 
+/**
+ * Socket-is-bootstrap v0.5 (axona-docs 7a27d24), RULE 4: once a newcomer's
+ * WebRTC channel to THIS bridge has bound and its last heartbeat report of
+ * its mesh size is fresh and at or above the safe floor, the socket is
+ * closed with 4200 — the same evidence and the same close vitality
+ * graduation uses. A client below its own floor reconnects (a fresh
+ * bootstrap); one whose report is stale or absent keeps its socket until the
+ * report qualifies or ordinary graduation takes it. Off unless the bridge
+ * node runs with the flag. Called on every heartbeat.
+ */
+let bootstrapSocketsClosed = 0;
+function maybeCloseBootstrapSocket(connId) {
+  if (!bridgeNode.socketBootstrapOn?.()) return false;
+  const c = connections.get(connId);
+  if (!c || !c.admitted) return false;
+  if (!bridgeNode.doorChannelBound?.(connId)) return false;
+  const now = Date.now();
+  const mb = freshMeshBound(c, now);
+  if (mb == null || mb < GRADUATION_SAFE_FLOOR) return false;
+  if (!gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL)) return false;
+  const nh = connNodeHex(connId);
+  try { c.ws.close(CLOSE_GRADUATED, 'bootstrap complete — your channel to this bridge is bound; freeing the socket'); } catch { /* dying */ }
+  if (nh) graduatedRecently.set(nh, now);
+  bootstrapSocketsClosed++;
+  bridgeNode.noteBootstrapSocketClosed?.(connId);
+  log('socket-released-bootstrap', { connId, uptimeMs: now - c.since, meshBound: mb, kernelVersion: c.kernelVersion });
+  return true;
+}
+
 // ── Embedded Axona peer (Phase 3) ────────────────────────────────────
 //
 // The bridge runs its own AxonaPeer as a server-class highway node.
@@ -1246,6 +1275,12 @@ wss.on('connection', (ws, req) => {
     // rest follow unchanged. Regions by bound nodeId (row 2); with the
     // newcomer's region unknown the list keeps its order.
     admittedPeers = orderSameRegionFirst(admittedPeers, connRegion, newcomerRegion);
+    // Socket-is-bootstrap v0.5, RULE 1: the bridge introduces ITSELF, first,
+    // under its reserved connection id — to a client whose kernel carries the
+    // route rule and the attempt id (reservedIdFor decides; null otherwise).
+    // The client dials it as it dials any peer-list entry (mesh.js:706).
+    const selfRid = bridgeNode.reservedIdFor?.(conn) ?? null;
+    if (selfRid) admittedPeers = [selfRid, ...admittedPeers];
     sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
 
     // 3. Tell existing admitted peers that someone new arrived.
@@ -1395,6 +1430,10 @@ wss.on('connection', (ws, req) => {
           if (!otherConn.admitted) continue;
           admittedPeers.push(otherId);
         }
+        // Socket-is-bootstrap v0.5: a re-warm list carries the reserved id too
+        // (the client's mesh skips an id it already holds).
+        const selfRid = bridgeNode.reservedIdFor?.(conn) ?? null;
+        if (selfRid) admittedPeers.unshift(selfRid);
         sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
         log('peer-list-rerequest', { connId: id, peers: admittedPeers.length });
         break;
@@ -1409,6 +1448,9 @@ wss.on('connection', (ws, req) => {
         if (Number.isInteger(msg.meshBound) && msg.meshBound >= 0) {
           conn.meshBound   = msg.meshBound;
           conn.meshBoundAt = Date.now();
+          // Socket-is-bootstrap v0.5, rule 4: a fresh qualifying report on a
+          // connection whose channel to this bridge has bound releases the socket.
+          if (maybeCloseBootstrapSocket(id)) break;
         }
         try {
           ws.send(JSON.stringify({
@@ -1455,6 +1497,15 @@ wss.on('connection', (ws, req) => {
         if (typeof to !== 'string') {
           logErr('signal-missing-to', { connId: id });
           break;
+        }
+        // Socket-is-bootstrap v0.5, RULE 2: a signal addressed to the bridge's
+        // own reserved id is neither relayed nor dropped — it enters the
+        // bridge's mesh under the door key for THIS connection (the sender is
+        // known only by its connection id; no node id is used before the
+        // channel's handshake). Answers come back over this socket through
+        // the door sink. Only an admitted connection may negotiate with us.
+        if (conn.admitted && bridgeNode.isReservedId?.(to)) {
+          if (bridgeNode.deliverDoorSignal(id, msg.payload)) { conn.signalsToBridge = (conn.signalsToBridge || 0) + 1; break; }
         }
         if (!connections.has(to)) {
           // Recipient is gone — silently drop.  This is a normal race:

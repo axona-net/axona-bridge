@@ -146,6 +146,29 @@ export class WebSocketTransport extends Transport {
   connIdFor(nodeId) { return this._connIdByNodeId.get(nodeId) ?? null; }
   nodeIdFor(connId) { return this._nodeIdByConnId.get(connId) ?? null; }
 
+  // Socket-is-bootstrap v0.5 (axona-docs 7a27d24, § Ownership): this door is
+  // a BOOTSTRAP route. The kernel's composite supersedes a socket route the
+  // instant the same identity binds on a mesh channel, and tells this
+  // transport so: pending requests on that identity fail `route-superseded`
+  // at once (never resolved later), the binding is KEPT so the socket still
+  // serves signalling and the peer-list, and the composite's router skips
+  // this sub for the identity from then on. A later hello on the socket is
+  // acknowledged by the bridge node without admission; the socket's close
+  // fires peer-died here as always and the composite swallows it.
+  get isBootstrap() { return true; }
+
+  supersedePeer(nodeId) {
+    let n = 0;
+    for (const [id, p] of this._pending.entries()) {
+      if (p.nodeId !== nodeId) continue;
+      clearTimeout(p.timer);
+      this._pending.delete(id);
+      n++;
+      p.reject(new Error('route-superseded'));
+    }
+    this._log('route-superseded', { nodeId: nodeId.toString(16), rejected: n });
+  }
+
   // ── Channel pool ─────────────────────────────────────────────────
 
   async openConnection(nodeId) {

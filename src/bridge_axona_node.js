@@ -53,6 +53,10 @@ import { WebSocketTransport } from './ws_transport.js';
 import { loadOrDeriveIdentity, idToHex } from './identity.js';
 import { resolveFillArming, assertArmedModules } from './fill_arming.js';
 import { DirectoryFeed } from './directory_feed.js';
+import {
+  resolveSocketBootstrap, mintDoorEpoch, reservedId, doorKey, parseDoorKey, isOwnDoorKey,
+  gteVersion as sbGteVersion, SlidingBudget, RecentlyRetired, assertKernelSurfaces,
+} from './socket_bootstrap.js';
 // NB: ./uplink.js (and its node-datachannel polyfill) is imported LAZILY inside
 // startUplink() so the native WebRTC module only loads when an uplink is actually
 // used — the testnet/uplink-off path never pays for it.
@@ -86,6 +90,23 @@ export class BridgeAxonaNode {
     // and a WebSocket transport that reports nothing: byte-for-byte the
     // behaviour before this change.
     this._arming = resolveFillArming(env);
+
+    // Socket-is-bootstrap v0.5 (axona-docs 7a27d24): resolved at construction
+    // (a bad value refuses here), OFF by default. The door epoch is minted
+    // once per process; the reserved id and every door-domain key carry it.
+    this._sb = resolveSocketBootstrap(env);
+    this._doorEpoch  = this._sb.on ? mintDoorEpoch() : null;
+    this._reservedId = this._sb.on ? reservedId(this._doorEpoch) : null;
+    this._sbBudget   = this._sb.on ? new SlidingBudget(this._sb.makeRoomPerMin) : null;
+    this._sbRetired  = this._sb.on ? new RecentlyRetired(this._sb.cooldownMs) : null;
+    /** connIds whose door channel to this bridge has BOUND (rule 4 reads it). @type {Set<string>} */
+    this._doorChannelBound = new Set();
+    this._sbStats = {
+      signalsIn: 0, signalsOut: 0, sinkDropsClosed: 0, offersRefusedCooldown: 0,
+      switches: 0, bornSuperseded: 0, routeReplacement: 0,
+      makeRoomRetires: 0, refused: { cooldown: 0, gate: 0, budget: 0, noVictim: 0 },
+      socketsClosedBootstrap: 0,
+    };
 
     this._identity  = null;
     this._engine    = null;
@@ -275,6 +296,7 @@ export class BridgeAxonaNode {
       built = await buildUplink({
         identity: this._identity, env, book, selfUrl,
         meshCap: this._arming.meshCap,   // bridge fill v0.8: the one resolved cap (legacy when not armed)
+        meshOnly: this._sb.on,           // socket-is-bootstrap v0.5: a seed bridge gets a mesh with no upstream
         log: (event, ctx) => this._log(`uplink:${event}`, ctx),
       });
     } catch (err) {
@@ -282,17 +304,192 @@ export class BridgeAxonaNode {
       return null;
     }
     if (!built) return null;
+    // Socket-is-bootstrap v0.5: with the flag on, the kernel must carry the
+    // surfaces the door relies on; a pin that lacks them is a REFUSAL here,
+    // before any socket or mesh is started (fail closed, like the arming).
+    if (this._sb.on) {
+      try { assertKernelSurfaces({ meshTransport: built.transport, composite: this._composite, peer: this._peer }); }
+      catch (err) { try { await built.transport.stop?.(); } catch { /* dying */ } this._log('socket-bootstrap-refused', { err: err?.message }); throw err; }
+    }
     try {
-      await built.transport.start();                         // upstream handshake
+      await built.transport.start();                         // upstream handshake (none when mesh-only)
       this._composite.addSubtransport(built.transport);      // fans existing handlers onto it
       this._uplink = built;
-      this._log('uplink-up', { upstream: built.upstream });
+      if (this._sb.on) this._wireDoorMesh(built.transport);  // socket-is-bootstrap v0.5
+      this._log('uplink-up', { upstream: built.upstream, meshOnly: built.meshOnly === true });
       return built.upstream;
     } catch (err) {
       this._log('uplink-start-failed', { upstream: built.upstream, err: err?.message });
       try { await built.transport.stop?.(); } catch { /* dying */ }
       return null;
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Socket-is-bootstrap v0.5 (axona-docs 7a27d24)
+  // ─────────────────────────────────────────────────────────────────
+
+  /** The reserved connection id the door advertises for itself (null when off). */
+  get reservedId() { return this._reservedId; }
+  socketBootstrapOn() { return this._sb.on === true; }
+  isReservedId(id) { return this._sb.on && id === this._reservedId; }
+
+  /**
+   * The reserved id a newcomer may be offered, or null: only with the flag
+   * on, only to a client whose kernel carries the composite route rule and
+   * the attempt id (§ Mixed versions; an older client would evict the bridge
+   * on the 4200 close or run legacy signalling against the door).
+   */
+  reservedIdFor({ kernelVersion, peerVersion } = {}) {
+    if (!this._sb.on || !this._uplink?.transport?.mesh) return null;
+    const v = kernelVersion || peerVersion || '0.0.0';
+    return sbGteVersion(v, this._sb.minKernel) ? this._reservedId : null;
+  }
+
+  /** The uplink/mesh transport (a webTransport composite), or null. */
+  _meshTransport() { return this._uplink?.transport ?? null; }
+
+  /**
+   * Wire the three kernel surfaces this design turns on, on the mesh
+   * transport: (1) ATTEMPT POLICY — a frame on a door key without an
+   * attempt id is dropped; (2) DEGREE POLICY — a door channel whose
+   * identity has not bound is PROVISIONAL (neither counted nor a candidate
+   * in the degree pass; bounded by provisionalMax and bindDeadlineMs);
+   * (3) the DOOR SIGNAL SINK — the mesh's answers and candidates for a door
+   * key go to that one door socket with `from` = the reserved id. And on
+   * the bridge's composite: (4) the BIND POLICY (eligibility → make room →
+   * admit), consulted before any kernel handler.
+   */
+  _wireDoorMesh(t) {
+    const epoch = this._doorEpoch;
+    const mesh = t.mesh, webrtc = t.webrtc;
+    mesh.setAttemptPolicy?.({ requireFor: (k) => isOwnDoorKey(k, epoch) });
+    mesh.setDegreePolicy?.({
+      isProvisional:  (k) => isOwnDoorKey(k, epoch) && webrtc.nodeIdFor?.(k) == null,
+      maxProvisional: this._sb.provisionalMax,
+      bindDeadlineMs: this._sb.bindDeadlineMs,
+    });
+    t.setDoorSignalSink?.((to, payload) => {
+      const p = parseDoorKey(to);
+      if (!p || p.epoch !== epoch) return false;              // not ours: fall through
+      if (!this._isConnOpen(p.connId)) { this._sbStats.sinkDropsClosed++; this._log('door-signal-drop-closed', { connId: p.connId, kind: payload?.kind }); return true; }
+      try {
+        this._sendToConn(p.connId, { type: 'signal', from: this._reservedId, payload });
+        this._sbStats.signalsOut++;
+      } catch (err) { this._log('door-signal-send-failed', { connId: p.connId, err: err?.message }); }
+      return true;
+    });
+    this._composite.setBindPolicy?.((nodeId, sub, token) => this._bindPolicy(nodeId, sub, token));
+    this._log('socket-bootstrap-wired', { epoch, reservedId: this._reservedId, provisionalMax: this._sb.provisionalMax, bindDeadlineMs: this._sb.bindDeadlineMs, makeRoomPerMin: this._sb.makeRoomPerMin, minKernel: this._sb.minKernel });
+  }
+
+  /**
+   * THE BIND POLICY (§ Make room, deferred to bind after eligibility; Aster
+   * 156d2e1d 3). Runs inside the composite for a bind that would ADMIT a new
+   * route, after step 0 and before any kernel handler. Only a door-channel
+   * bind on the mesh transport is decided here; every other bind passes.
+   *
+   *   1. identity cooldown → refuse
+   *   2. the kernel's pure gatePreflight → !admit → refuse
+   *   3. at the mesh cap, counting the newcomer: budget spent → refuse;
+   *      no eligible incumbent (dry run) → refuse; else retire ONE incumbent
+   *   4. pass: the bind proceeds to the kernel's own admission (the commit
+   *      the preflight predicted); the channel's bind deadline is cleared
+   *      and the door learns the channel bound (rule 4 reads it).
+   *
+   * A refusal closes the newcomer's own channel through the mesh transport
+   * (unbind first, so no death is reported) and touches no incumbent.
+   */
+  _bindPolicy(nodeId, sub, token) {
+    const t = this._meshTransport();
+    if (!t || sub !== t) return true;
+    const p = parseDoorKey(token);
+    if (!p || p.epoch !== this._doorEpoch) return true;
+    const idHex = idToHex(nodeId);
+    const refuse = (why, extra = {}) => {
+      this._sbStats.refused[why] = (this._sbStats.refused[why] ?? 0) + 1;
+      this._log('door-bind-refused', { connId: p.connId, peer: idHex, why, ...extra });
+      // Deferred a tick: this runs inside the mesh transport's bindPeer.
+      setTimeout(() => { try { const r = t.closeConnection(nodeId); r?.catch?.(() => {}); } catch { /* dying */ } }, 0);
+      return false;
+    };
+    if (this._sbRetired.hasIdentity(idHex)) return refuse('cooldown');
+    let pre;
+    try { pre = this._peer.gatePreflight(nodeId); } catch (err) { return refuse('gate', { err: err?.message }); }
+    if (!pre.admit) return refuse('gate', { why: pre.why });
+    const mesh = t.mesh;
+    const cap = this._arming.meshCap ?? this._node?._maxSynaptome ?? 0;
+    const openCounted = mesh.openNonProvisionalCount?.() ?? 0;   // the newcomer is bound now, so it counts
+    if (cap > 0 && openCounted > cap) {
+      if (!this._sbBudget.ok()) return refuse('budget', { open: openCounted, cap });
+      const victim = mesh.retireForNewcomer(token, { dryRun: true });
+      if (!victim) return refuse('noVictim', { open: openCounted, cap });
+      const victimId = t.webrtc?.nodeIdFor?.(victim);
+      mesh.retireForNewcomer(token);
+      this._sbBudget.spend();
+      if (typeof victimId === 'bigint') this._sbRetired.markIdentity(idToHex(victimId));
+      const vp = parseDoorKey(victim);
+      if (vp && vp.epoch === this._doorEpoch) this._sbRetired.markConn(vp.connId);
+      this._sbStats.makeRoomRetires++;
+      this._log('door-make-room', { connId: p.connId, newcomer: idHex, victimKey: victim, victim: typeof victimId === 'bigint' ? idToHex(victimId) : null, open: openCounted, cap });
+    }
+    mesh.clearBindDeadline?.(token);
+    this._doorChannelBound.add(p.connId);
+    this._log('door-channel-bound', { connId: p.connId, peer: idHex, how: pre.how });
+    return true;
+  }
+
+  /**
+   * server.js: a `signal` frame addressed to the reserved id. Delivered into
+   * the mesh under the door key; the sender is known only by its connection
+   * id, which is all the key carries. A new offer from a connection in the
+   * retire cooldown is refused (per-connection scope). Returns true when the
+   * frame was consumed here (never relayed).
+   */
+  deliverDoorSignal(connId, payload) {
+    const t = this._meshTransport();
+    if (!this._sb.on || !t?.mesh) return false;
+    if (payload?.kind === 'sdp-offer' && this._sbRetired.hasConn(connId)) {
+      this._sbStats.offersRefusedCooldown++;
+      this._log('door-offer-refused-cooldown', { connId });
+      return true;
+    }
+    this._sbStats.signalsIn++;
+    try { const r = t.mesh.onSignal(doorKey(this._doorEpoch, connId), payload); r?.catch?.((err) => this._log('door-signal-threw', { connId, err: err?.message })); }
+    catch (err) { this._log('door-signal-threw', { connId, err: err?.message }); }
+    return true;
+  }
+
+  /** Has this connection's channel to the bridge bound? (rule 4) */
+  doorChannelBound(connId) { return this._doorChannelBound.has(connId); }
+
+  /** server.js: the socket closed with 4200 because the channel bound. */
+  noteBootstrapSocketClosed(connId) { this._sbStats.socketsClosedBootstrap++; this._log('door-socket-released', { connId }); }
+
+  /** Socket-bootstrap report for /healthz and /diag (null when off). */
+  socketBootstrapStatus() {
+    if (!this._sb.on) return null;
+    const t = this._meshTransport();
+    const ds = (() => { try { return t?.mesh?.degreeStats?.() ?? null; } catch { return null; } })();
+    return {
+      on: true,
+      epoch: this._doorEpoch,
+      reservedId: this._reservedId,
+      meshOnly: this._uplink?.meshOnly === true,
+      minKernel: this._sb.minKernel,
+      provisionalMax: this._sb.provisionalMax,
+      bindDeadlineMs: this._sb.bindDeadlineMs,
+      makeRoomPerMin: this._sb.makeRoomPerMin,
+      provisional: ds?.provisional ?? null,
+      provisionalRefused: ds?.provisionalRefused ?? null,
+      bindTimeouts: ds?.bindTimeouts ?? null,
+      attempts: ds?.attempts ?? null,
+      doorChannelsBound: this._doorChannelBound.size,
+      budgetInWindow: this._sbBudget.inWindow(),
+      cooldown: this._sbRetired.stats(),
+      routes: this._composite?.routeStats ?? null,
+      ...this._sbStats,
+    };
   }
 
   /**
@@ -329,6 +526,7 @@ export class BridgeAxonaNode {
         meshOpen:           mesh?.open ?? null,
         pendingAllocations: ledger?.outboundPending ?? null,
       },
+      socketBootstrap: this.socketBootstrapStatus(),
     };
   }
 
@@ -384,6 +582,16 @@ export class BridgeAxonaNode {
     this._helloByConnId.delete(connId);
     this._serverNonceByConn.delete(connId);
     this._transport.handleConnClosed(connId);
+    // Socket-is-bootstrap v0.5: the door socket's close cancels an UNBOUND
+    // negotiation under its door key and leaves an OPEN channel alone
+    // (mesh.onPeerLeft keeps state 'open'); the identity's route record in
+    // the composite is settled by the route rule (a superseded socket's
+    // death is swallowed there).
+    if (this._sb.on) {
+      this._doorChannelBound.delete(connId);
+      const t = this._meshTransport();
+      try { t?.mesh?.onPeerLeft?.(doorKey(this._doorEpoch, connId)); } catch { /* no such key */ }
+    }
   }
 
   /**
@@ -596,7 +804,12 @@ export class BridgeAxonaNode {
 
     if (!node._deadPeers) node._deadPeers = new Set();
     t.onPeerDied((deadId) => {
-      if (typeof deadId === 'bigint') node._deadPeers.add(deadId);
+      if (typeof deadId !== 'bigint') return;
+      // Socket-is-bootstrap v0.5: a socket's close is not the identity's
+      // death when the identity is admitted on a mesh route (the composite
+      // swallows that death; its record still names the surviving route).
+      if (this._sb.on && this._composite?.routeOf?.(deadId)) return;
+      node._deadPeers.add(deadId);
     });
   }
 
@@ -630,6 +843,20 @@ export class BridgeAxonaNode {
     if (this._helloByConnId.get(connId) === 'complete') return;
     this._helloByConnId.set(connId, 'complete');
     this._transport.bindPeer(peerNodeId, connId);
+
+    // Socket-is-bootstrap v0.5, rule (b) reverse: the socket hello landed
+    // AFTER this identity bound on a mesh channel. The composite's route rule
+    // marked the socket route born superseded on bindPeer above; the bridge
+    // admits nothing for it (the identity is admitted on the channel), and
+    // the socket stays open for signalling and the peer-list until rule 4.
+    if (this._sb.on) {
+      const route = this._composite?.routeOf?.(peerNodeId) ?? null;
+      if (route && route.sub !== this._transport) {
+        this._sbStats.bornSuperseded++;
+        this._log('handshake-born-superseded', { connId, peerNodeId: idToHex(peerNodeId) });
+        return;
+      }
+    }
 
     // Admit the browser as a Synapse.  Latency stub: getLatency on
     // ws_transport returns 50ms for now.
