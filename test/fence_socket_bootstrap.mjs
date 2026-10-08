@@ -24,7 +24,9 @@
 //   E. HELLO FIRST. A socket hello before the channel admits over the
 //      socket; the channel bind is a SWITCH (no re-admission, one entry);
 //      the socket close is swallowed; the mesh death evicts.
-//   F. MAKE ROOM AT BIND. At cap 3 a fourth newcomer's bind retires ONE
+//   F. MAKE ROOM AT BIND. The trigger is ABOVE the target with the newcomer
+//      counted: at cap 8, the eighth incumbent (count 8 = cap) admits with
+//      no retire (the 49→50 case); the ninth (count 9) retires ONE
 //      incumbent (never the newcomer, never a provisional) and is admitted;
 //      the victim's identity is refused at its next bind (cooldown) and its
 //      channel closed; budget spent → refused; protected set → refused; an
@@ -259,12 +261,32 @@ async function newcomer(node, door, mesh, connId, attempt = 'A') {
     const F_ENV = { ...ON_ENV, BRIDGE_MESH_MAX_PEERS: '8' };
     const { node, mesh, webrtc } = await makeNode(F_ENV, door, 8);
     node._peer._gateCfg.laneCooldownMs = 0;
+    // Refusal closes BY TOKEN (Vega ca661612): an identity refused on one
+    // channel that binds on another channel in the same tick keeps the
+    // second; only the refused key is retired. Run on an EMPTY table so the
+    // gate admits and no make-room runs.
+    {
+      const r1 = await newcomer(node, door, mesh, 'cx', 'X1');
+      const r2 = await newcomer(node, door, mesh, 'cy', 'X2');
+      const Px = idOf(node, 40);
+      node._sbRetired.markIdentity(idToHex(Px));                         // make this identity refusable (cooldown)
+      webrtc.bindPeer(Px, r1.key);                                       // refused (cooldown) → a close is scheduled for r1.key, next tick
+      node._sbRetired._ids.delete(idToHex(Px));                          // the cooldown lifts within the tick
+      webrtc.unbindPeer(r1.key); webrtc.bindPeer(Px, r2.key);            // the identity binds on ANOTHER channel in the same tick
+      const admittedOnR2 = node._node.synaptome.has(Px) && webrtc.meshIdFor(Px) === r2.key;
+      await tick(); await tick();
+      check('F1b a refusal closes only the refused channel: the identity\'s current channel survives the deferred close', admittedOnR2 && mesh._peers.has(r2.key) && !mesh._peers.has(r1.key) && node._node.synaptome.has(Px), JSON.stringify({ admittedOnR2, r1: mesh._peers.has(r1.key), r2: mesh._peers.has(r2.key), inTable: node._node.synaptome.has(Px) }));
+      // tidy: the channel DIES (a voluntary close would leave the identity in the table), so the incumbents below start from an empty table
+      mesh._retire(webrtc.meshIdFor(Px), 'pc-closed'); await tick();
+      check('F1c tidy: the identity left the table with its channel', !node._node.synaptome.has(Px) && node._node.synaptome.size === 0, String(node._node.synaptome.size));
+      node._sbStats.refused.cooldown = 0;
+    }
     const inc = [];
     for (let k = 0; k < 8; k++) {
       const cid = `c${k + 1}`; const { key } = await newcomer(node, door, mesh, cid, `I${k}`);
       const P = idOf(node, 10 + k); webrtc.bindPeer(P, key); await tick(); inc.push({ cid, key, P });
     }
-    check('F1 eight incumbents admitted at cap 8, none retired', inc.every((i) => node._node.synaptome.has(i.P)) && mesh.openNonProvisionalCount() === 8 && node._sbStats.makeRoomRetires === 0, JSON.stringify(node._sbStats.refused));
+    check('F1 eight incumbents admitted at cap 8, none retired (count = target admits without a retire: the 49→50 case)', inc.every((i) => node._node.synaptome.has(i.P)) && mesh.openNonProvisionalCount() === 8 && node._sbStats.makeRoomRetires === 0, JSON.stringify(node._sbStats.refused));
     // a ninth newcomer from ANOTHER region (the gate's improve rule has a swap; the mesh selector a victim)
     const n9 = await newcomer(node, door, mesh, 'c9', 'N9'); const P9 = idOfRegion(node, 20);
     webrtc.bindPeer(P9, n9.key); await tick();
