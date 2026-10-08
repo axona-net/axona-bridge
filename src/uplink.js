@@ -57,9 +57,9 @@ export function meshDegreeFor(meshCap) {
   return Number.isFinite(meshCap) && meshCap > 0 ? { maxPeers: meshCap } : null;
 }
 
-export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined }) {
+export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined, meshOnly = false }) {
   const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
-  if (!upstream) return null;
+  if (!upstream && !meshOnly) return null;
 
   // Shape a kernel-Identity for webTransport's authenticated client hello.
   // The bridge's hybrid identity carries privateKey/pubkey(Hex)/idHex but no
@@ -87,6 +87,26 @@ export async function buildUplink({ identity, env = process.env, book = null, se
   // this file has always run.
   const wsCap   = Number.parseInt(env.BRIDGE_MAX_PEERS ?? '32', 10);
   if (meshCap === undefined) meshCap = Number.parseInt(env.BRIDGE_MESH_MAX_PEERS ?? String(wsCap), 10);
+  if (!upstream) {
+    // Socket-is-bootstrap v0.5 (axona-docs 7a27d24): a SEED bridge with no
+    // bridge above it still needs a mesh, because its newcomers dial it over
+    // WebRTC through its own door. The kernel's mesh-only web transport opens
+    // no upstream socket; its only signalling domain is the door sink the
+    // bridge node installs.
+    const transport = webTransport({
+      bridgeUrl: null, meshOnly: true,
+      identity:  uplinkIdentity,
+      meshRelay: true,
+      reconnect: false,
+      autoHandshake: false,
+      meshDegree: meshDegreeFor(meshCap),
+      WebSocketImpl,
+      log: (event, ctx) => log(`tx:${event}`, ctx),
+    });
+    log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap, meshOnly: true });
+    log('selected', { upstream: null, meshOnly: true });
+    return { transport, upstream: null, meshOnly: true };
+  }
   const transport = webTransport({
     bridgeUrl: upstream,
     identity:  uplinkIdentity,
