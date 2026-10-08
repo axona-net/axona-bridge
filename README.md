@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.153.0**, embedding kernel **4.107.1** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.154.0**, embedding kernel **4.107.2** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -57,7 +57,7 @@ on its signer, so clients still discover, rank, and fail over to it across resta
 ```bash
 npm install
 npm start
-# → {"ts":"…","level":"info","event":"listen","host":"0.0.0.0","port":8080,"logLevel":"info","version":"2.153.0","idleTimeoutMs":15000,"idleCheckIntervalMs":5000,"turnMinting":…}
+# → {"ts":"…","level":"info","event":"listen","host":"0.0.0.0","port":8080,"logLevel":"info","version":"2.154.0","idleTimeoutMs":15000,"idleCheckIntervalMs":5000,"turnMinting":…}
 ```
 
 That line is the shape a production bridge logged on 2026-10-02. Note that a bridge
@@ -81,12 +81,12 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"2.153.0","kernelVersion":"4.107.1"}
+# {"status":"ok","version":"2.154.0","kernelVersion":"4.107.2"}
 
 curl -H "X-Healthz-Token: $HEALTHZ_TOKEN" http://localhost:8080/healthz
 # {"status":"ok","connections":…,"admitted":…,"pending":…,"minPeerVersion":"1.1.0",
 #  "minKernelVersion":"3.15.0","minPeerAppVersion":"3.15.0","uptimeS":…,
-#  "version":"2.153.0","kernelVersion":"4.107.1","nursery":{…},"axona":{…},
+#  "version":"2.154.0","kernelVersion":"4.107.2","nursery":{…},"axona":{…},
 #  "directory":{…},"uplink":{…},"meshDegree":{…},"admission":{…},"loop":{…}}
 ```
 
@@ -197,13 +197,14 @@ default here as a claim to check against the code, not the reverse.
 | **Idle reaping** | | |
 | `IDLE_TIMEOUT_MS` | `15000` | a connection silent this long is a ghost, its TCP dropped without a close frame, and is terminated |
 | `IDLE_CHECK_INTERVAL_MS` | `5000` | how often the idle sweep runs |
+| `BRIDGE_UNBOUND_KICK_MS` | `120000` | 2.154.0. An admitted socket that has not bound an identity (the authenticated hello over this socket) this long is closed 4401, a plain-disconnect code the kernel reconnects from. The idle sweep cannot see such a socket: it pongs. `0` = never. `/healthz` `nursery.unboundKicked` counts them |
 | **TURN** | | |
 | `TURN_AUTH_SECRET` | unset | shared secret for minting `use-auth-secret` credentials, also read by coturn. Unset = none minted |
 | `TURN_URLS` | `turn:turn.axona.net:3478` | comma-separated TURN URLs handed to browsers. Advertise only what is served: a `turns:` URL with nothing listening costs every client ICE time |
 | **Nursery and anchors** | | |
 | `BRIDGE_NURSERY` | `on` | hand a newcomer a bounded, keyspace-diverse anchor set instead of the full peer list. `off` restores the full list AND disables graduation |
 | `BRIDGE_ANCHOR_K` | `8` | anchors handed to each newcomer |
-| `BRIDGE_ANCHOR_MIN_POOL` | `3 × BRIDGE_ANCHOR_K` | below this many eligible peers the bridge hands the full list, so the nursery stays inert on a small network |
+| `BRIDGE_ANCHOR_MIN_POOL` | `3 × BRIDGE_ANCHOR_K` | below this many eligible peers the bridge hands the full list, so the nursery stays inert on a small network. Production runs `10`. Since 2.154.0 a bounded selection takes BOUND identities first (one per region, then by score) and an unbound socket only when fewer than `BRIDGE_ANCHOR_K` bound ones exist |
 | `BRIDGE_ANCHOR_MIN_UPTIME_MS` | `15000` | minimum uptime for a peer to be offered as an anchor |
 | `BRIDGE_MAX_PEERS` | `32` | admitted connections held before graduation begins. Production east runs `15` |
 | `BRIDGE_MESH_MAX_PEERS` | `= BRIDGE_MAX_PEERS` | the same bound on the bridge's own WebRTC mesh degree, so a bridge is not capped on one side and unbounded on the other. `0` disables the mesh cap alone; the production bridges' `/diag` reads `meshDegree.cap: 0` |
@@ -304,7 +305,7 @@ axona-bridge/
 The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#<tag>`. To move the bridge to a new kernel, run the release ritual:
 
 ```bash
-scripts/repin-kernel.sh v4.107.1       # re-pin + lockfile + npm test gate + version bump + commit
+scripts/repin-kernel.sh v4.107.2       # re-pin + lockfile + npm test gate + version bump + commit
 ```
 
 It regenerates `package-lock.json` (the lock must track the pin), verifies the lockfile reproduces with `npm ci`, and **refuses to commit unless `npm test` (the embedded-peer smoke) passes** — then leaves push and deploy as deliberate manual steps. The bridge is one of about

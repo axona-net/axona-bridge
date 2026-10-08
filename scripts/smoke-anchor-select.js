@@ -194,5 +194,39 @@ const regionOfIn = (cands) => (id) => cands.find((c) => c.id === id)?.region ?? 
   ok('newcomer never anchors itself', !anchors.includes('newself'));
 }
 
+// 10. BOUND BEFORE UNBOUND (2.154.0). 2026-10-08, east production: seventeen
+//     sockets, sixteen identity-less and forty minutes old. Score is uptime
+//     minus load, so the old pass 2 handed every newcomer those sixteen before
+//     any bound peer that had joined later. With the old pass 2 restored (fill
+//     by score regardless of region), 10a and 10c fail.
+{
+  // 10a: twelve bound (fresh, six regions) + eight unbound (much older): no unbound anchor.
+  const bound   = pool(12, { region: (i) => i % 6, ageMs: 60_000 });
+  const unbound = Array.from({ length: 8 }, (_, i) => ({ id: handle(100 + i), region: null, admitted: true, since: NOW - 2_400_000, anchorUses: 0 }));
+  const { anchors, fellBack } = selectAnchors([...bound, ...unbound], { newId: 'nx', now: NOW, k: 8, minUptimeMs: 15000, minPool: 10 });
+  ok('10a bounded selection engaged (not the full list)', !fellBack && anchors.length === 8, `n=${anchors.length} fellBack=${fellBack}`);
+  ok('10a no identity-less socket is an anchor while twelve bound ones exist', anchors.every((id) => !id.startsWith('c2') || Number.parseInt(id.slice(1), 36) < 100), anchors.join(','));
+  const unboundIds = new Set(unbound.map((c) => c.id));
+  ok('10a (by id set) none of the eight unbound ids chosen', !anchors.some((id) => unboundIds.has(id)));
+}
+{
+  // 10b: three bound + ten unbound: the three bound come first, unbound fill the rest to k.
+  const bound   = pool(3, { region: (i) => i, ageMs: 60_000 });
+  const unbound = Array.from({ length: 10 }, (_, i) => ({ id: handle(200 + i), region: null, admitted: true, since: NOW - 2_400_000, anchorUses: 0 }));
+  const { anchors } = selectAnchors([...bound, ...unbound], { newId: 'nx', now: NOW, k: 8, minUptimeMs: 15000, minPool: 10 });
+  const boundIds = new Set(bound.map((c) => c.id));
+  ok('10b with fewer than k bound, all bound are chosen', bound.every((c) => anchors.includes(c.id)));
+  ok('10b the bound anchors precede every unbound one', anchors.slice(0, 3).every((id) => boundIds.has(id)), anchors.join(','));
+  ok('10b unbound sockets fill the remaining slots to k', anchors.length === 8);
+}
+{
+  // 10c: a late-joining bound peer (20 s) outranks a forty-minute unbound socket.
+  const late    = { id: handle(300), region: '7a', admitted: true, since: NOW - 20_000, anchorUses: 0 };
+  const bound   = pool(9, { region: (i) => i % 3, ageMs: 60_000 });
+  const unbound = Array.from({ length: 6 }, (_, i) => ({ id: handle(400 + i), region: null, admitted: true, since: NOW - 2_400_000, anchorUses: 0 }));
+  const { anchors } = selectAnchors([...bound, late, ...unbound], { newId: 'nx', now: NOW, k: 8, minUptimeMs: 15000, minPool: 10 });
+  ok('10c a bound peer that joined 20 s ago is an anchor; the forty-minute unbound ones are not', anchors.includes(late.id) && !anchors.some((id) => id.startsWith(handle(400).slice(0, 3))), anchors.join(','));
+}
+
 console.log(`\n${fail ? '✗' : '✓'} smoke-anchor-select: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

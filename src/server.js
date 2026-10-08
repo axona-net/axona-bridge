@@ -152,6 +152,13 @@ const CLOSE_UPGRADE_REQUIRED = 4426;   // mirrors HTTP 426 "Upgrade Required"
 // version/wire/kernel mismatch still closes 4426 (terminal, see the admission
 // gate), so the two meanings no longer share a code.
 const CLOSE_HELLO_TIMEOUT    = 4408;   // mirrors HTTP 408 "Request Timeout"
+// An ADMITTED socket that has not bound an identity (the authenticated
+// hello/hello-ack over this socket) within BRIDGE_UNBOUND_KICK_MS is closed
+// with this code. Like 4408 it carries no version verdict: the kernel treats it
+// as a plain disconnect and reconnects with backoff. 2026-10-08, east: sixteen
+// sockets from one host, kernel 4.84.0, admitted and never bound for forty
+// minutes, pinging so the idle sweep never saw them; they were the anchors.
+const CLOSE_UNAUTHENTICATED  = 4401;   // mirrors HTTP 401
 
 // ── Flag-day floors for the v2.9.0 envelope format (findings C-2/E-4) ──────
 // The signed-envelope format changed (per-publisher `seq` + freshness window +
@@ -331,6 +338,11 @@ function makeTurnCredential(_peerId) {
 // production runs the defaults.
 const IDLE_TIMEOUT_MS         = Number.parseInt(process.env.IDLE_TIMEOUT_MS ?? '15000', 10);
 const IDLE_CHECK_INTERVAL_MS  = Number.parseInt(process.env.IDLE_CHECK_INTERVAL_MS ?? '5000', 10);
+// How long an admitted socket may stay without a bound identity before it is
+// closed (CLOSE_UNAUTHENTICATED). A current kernel binds within a second of
+// `welcome` (0.2–0.3 s observed on 2026-10-08); 120 s absorbs a loop stall and
+// a slow-waking tab. 0 = never. Swept on the idle sweep's cadence.
+const UNBOUND_KICK_MS         = Number.parseInt(process.env.BRIDGE_UNBOUND_KICK_MS ?? '120000', 10);
 
 let connSeq = 0;
 /** @type {Map<string, {ws: any, ip: string, since: number, lastSeenAt: number, pings: number, pongs: number, signalsRelayed: number, ua: string, meshBound: number|null, meshBoundAt: number}>} */
@@ -463,6 +475,7 @@ const GRADUATION_INTERVAL_MS = parseInt(process.env.BRIDGE_GRADUATION_INTERVAL_M
 const GRADUATION_COOLDOWN_MS = parseInt(process.env.BRIDGE_GRADUATION_COOLDOWN_MS ?? '60000', 10);
 const CLOSE_GRADUATED_HIGH   = MAX_PEERS + GRADUATION_SLACK;
 let   graduatedTotal  = 0;
+let   unboundKicked   = 0;   // admitted sockets closed for never binding an identity (CLOSE_UNAUTHENTICATED)
 let   lastGraduationAt = 0;
 const graduatedRecently = new Map();   // nodeId hex → ts of last graduation (cooldown)
 
@@ -896,6 +909,8 @@ const httpServer = http.createServer((req, res) => {
           bounded:   nurseryIntros - nurseryFellBack,
           maxPeers:  MAX_PEERS,
           graduated: graduatedTotal,    // established peers released to free bridge slots
+          unboundKickMs: UNBOUND_KICK_MS,
+          unboundKicked,                // admitted sockets closed 4401 for never binding an identity
         },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
@@ -1616,18 +1631,35 @@ function sweepIdleConnections() {
     return;
   }
   const toKick = [];
+  const unbound = [];
   for (const [id, conn] of connections) {
     const idleMs = now - conn.lastSeenAt;
-    if (idleMs > IDLE_TIMEOUT_MS) toKick.push({ id, conn, idleMs });
+    if (idleMs > IDLE_TIMEOUT_MS) { toKick.push({ id, conn, idleMs }); continue; }
+    // Unbound kick: admitted, older than the deadline, and no identity bound
+    // to this socket. The idle sweep cannot see these — they pong.
+    if (UNBOUND_KICK_MS > 0 && conn.admitted && (now - conn.since) > UNBOUND_KICK_MS && !boundNodeIdOf(id)) {
+      unbound.push({ id, conn, ageMs: now - conn.since });
+    }
+  }
+  // Close after the iteration so the close-handler's connections.delete()
+  // doesn't mutate the map mid-walk.
+  for (const { id, conn, ageMs } of unbound) {
+    unboundKicked++;
+    log('unbound-kick', { connId: id, ageMs, peerVersion: conn.peerVersion, pongs: conn.pongs });
+    try { conn.ws.close(CLOSE_UNAUTHENTICATED, `no identity bound within ${UNBOUND_KICK_MS} ms of admission`); }
+    catch (err) { logErr('unbound-kick-close-failed', { connId: id, err: err.message }); }
   }
   if (toKick.length === 0) return;
-  // Terminate after the iteration so the close-handler's
-  // connections.delete() doesn't mutate the map mid-walk.
   for (const { id, conn, idleMs } of toKick) {
     log('idle-kick', { connId: id, idleMs, lastPings: conn.pings });
     try { conn.ws.terminate(); }
     catch (err) { logErr('terminate-failed', { connId: id, err: err.message }); }
   }
+}
+/** The authenticated nodeId bound to connection `id` by the transport, or null. */
+function boundNodeIdOf(id) {
+  try { const b = bridgeNode.transport?.nodeIdFor?.(id); return (b === undefined || b === null) ? null : b; }
+  catch { return null; }
 }
 const idleSweepTimer = setInterval(sweepIdleConnections, IDLE_CHECK_INTERVAL_MS);
 

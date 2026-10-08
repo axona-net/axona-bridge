@@ -95,7 +95,24 @@ export function selectAnchors(candidates, {
     if (region == null) continue;
     if (!usedRegions.has(region) && !chosen.includes(id)) { chosen.push(id); usedRegions.add(region); }
   }
-  // Pass 2: fill remaining slots with the next-highest scorers.
+  // Pass 2: fill remaining slots with the next-highest scorers that have a
+  // BOUND identity (region non-null). Pass 1 took one per region; this takes
+  // the rest of the bound pool by score.
+  //
+  // 2026-10-08, east production: seventeen sockets, sixteen of them
+  // identity-less (a kernel-4.84.0 application that never authenticates),
+  // forty minutes old. Score is uptime minus load, so pass 2 handed every
+  // newcomer those sixteen before any peer that had joined more recently with
+  // an identity: eight dialled, one bound, Howard's suite 84/92 mismatched. A
+  // socket that has not said who it is cannot be an anchor while a bound one
+  // is available.
+  for (const { id, region } of scored) {
+    if (chosen.length >= k) break;
+    if (region == null) continue;
+    if (!chosen.includes(id)) chosen.push(id);
+  }
+  // Pass 3: only when fewer than k BOUND candidates exist does an unbound
+  // socket fill a slot — a cold door still introduces whoever it has.
   for (const { id } of scored) {
     if (chosen.length >= k) break;
     if (!chosen.includes(id)) chosen.push(id);
