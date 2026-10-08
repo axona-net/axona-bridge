@@ -410,13 +410,19 @@ export class BridgeAxonaNode {
       this._sbStats.refused[why] = (this._sbStats.refused[why] ?? 0) + 1;
       this._log('door-bind-refused', { connId: p.connId, peer: idHex, why, ...extra });
       // Deferred a tick: this runs inside the mesh transport's bindPeer. The
-      // close is BY TOKEN (Vega ca661612): only the refused channel is closed.
-      // If the identity still sits on that channel, close it through the
-      // transport (unbind first, no death reported); if the identity moved to
-      // another channel in the meantime, retire the refused key alone and
-      // leave the identity's current channel untouched.
+      // close is BY STATE (Aster 8fb51cdb, Vega 580255ec): the refused
+      // channel's incarnation is captured now, and the callback acts only if
+      // the key STILL holds that incarnation — a same-key replacement that
+      // took the key before the callback fires is left alone, whatever its
+      // identity or state. Then by token (Vega ca661612): if the identity
+      // still sits on the refused channel, close it through the transport
+      // (unbind first, no death reported); if the identity moved to another
+      // channel, retire the refused key alone.
+      const incAtRefusal = t.mesh?.incFor?.(token) ?? null;
       setTimeout(() => {
         try {
+          const incNow = t.mesh?.incFor?.(token) ?? null;
+          if (incNow !== incAtRefusal) { this._log('door-bind-refused-close-skipped', { connId: p.connId, why: 'key-replaced', incAtRefusal, incNow }); return; }
           const cur = t.webrtc?.meshIdFor?.(nodeId) ?? null;
           if (cur === token) { const r = t.closeConnection(nodeId); r?.catch?.(() => {}); }
           else if (t.mesh?.hasPeer?.(token)) t.mesh.disconnect(token, 'bind-refused');

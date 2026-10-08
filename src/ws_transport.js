@@ -139,7 +139,10 @@ export class WebSocketTransport extends Transport {
 
   unbindPeer(connId) {
     const nodeId = this._nodeIdByConnId.get(connId);
-    if (nodeId !== undefined) this._connIdByNodeId.delete(nodeId);
+    // Only clear the forward mapping if THIS connection is still the
+    // identity's current binding; an identity that re-bound on a newer
+    // connection keeps that binding when the older socket closes.
+    if (nodeId !== undefined && this._connIdByNodeId.get(nodeId) === connId) this._connIdByNodeId.delete(nodeId);
     this._nodeIdByConnId.delete(connId);
   }
 
@@ -350,15 +353,25 @@ export class WebSocketTransport extends Transport {
   handleConnClosed(connId) {
     const nodeId = this._nodeIdByConnId.get(connId);
     const reported = nodeId ?? connId;
-    for (const h of this._peerDiedHandlers) {
-      try { h(reported); }
-      catch (err) { this._log('peer-died-handler-threw', { err: err.message }); }
-    }
-    for (const [id, p] of this._pending.entries()) {
-      if (p.nodeId !== nodeId) continue;
-      clearTimeout(p.timer);
-      this._pending.delete(id);
-      p.reject(new Error('peer-died'));
+    // Socket-is-bootstrap v0.5 (Aster 3d778257 RT-2): a death is fired only
+    // when THIS connection is still the identity's current binding; an older
+    // socket's close after the identity re-bound on a newer one is the
+    // closure of a stale route, not a death. The connId rides along as the
+    // route token for the composite's own death fence.
+    const isCurrent = nodeId === undefined || this._connIdByNodeId.get(nodeId) === connId;
+    if (isCurrent) {
+      for (const h of this._peerDiedHandlers) {
+        try { h(reported, 'socket-closed', connId); }
+        catch (err) { this._log('peer-died-handler-threw', { err: err.message }); }
+      }
+      for (const [id, p] of this._pending.entries()) {
+        if (p.nodeId !== nodeId) continue;
+        clearTimeout(p.timer);
+        this._pending.delete(id);
+        p.reject(new Error('peer-died'));
+      }
+    } else {
+      this._log('conn-closed-stale-binding', { connId, current: this._connIdByNodeId.get(nodeId) });
     }
     this.unbindPeer(connId);
   }
