@@ -409,8 +409,19 @@ export class BridgeAxonaNode {
     const refuse = (why, extra = {}) => {
       this._sbStats.refused[why] = (this._sbStats.refused[why] ?? 0) + 1;
       this._log('door-bind-refused', { connId: p.connId, peer: idHex, why, ...extra });
-      // Deferred a tick: this runs inside the mesh transport's bindPeer.
-      setTimeout(() => { try { const r = t.closeConnection(nodeId); r?.catch?.(() => {}); } catch { /* dying */ } }, 0);
+      // Deferred a tick: this runs inside the mesh transport's bindPeer. The
+      // close is BY TOKEN (Vega ca661612): only the refused channel is closed.
+      // If the identity still sits on that channel, close it through the
+      // transport (unbind first, no death reported); if the identity moved to
+      // another channel in the meantime, retire the refused key alone and
+      // leave the identity's current channel untouched.
+      setTimeout(() => {
+        try {
+          const cur = t.webrtc?.meshIdFor?.(nodeId) ?? null;
+          if (cur === token) { const r = t.closeConnection(nodeId); r?.catch?.(() => {}); }
+          else if (t.mesh?.hasPeer?.(token)) t.mesh.disconnect(token, 'bind-refused');
+        } catch { /* dying */ }
+      }, 0);
       return false;
     };
     if (this._sbRetired.hasIdentity(idHex)) return refuse('cooldown');
