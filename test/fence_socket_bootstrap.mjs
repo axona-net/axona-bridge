@@ -323,6 +323,36 @@ async function newcomer(node, door, mesh, connId, attempt = 'A') {
     await node.stop();
   }
 
+  // ── H. Aster 8fb51cdb / Vega 580255ec: a refusal fences the STATE, not the key; the door fences a stale socket close ──
+  if (kernelHasSurfaces) {
+    const door = makeDoor();
+    const { node, mesh, webrtc } = await makeNode(ON_ENV, door);
+    node._peer._gateCfg.laneCooldownMs = 0;
+    // refuse A on key K (cooldown), end A before the callback, let B take K, then let the callback run
+    const Px = idOf(node, 50);
+    node._sbRetired.markIdentity(idToHex(Px));
+    const a = await newcomer(node, door, mesh, 'ck', 'KA');
+    webrtc.bindPeer(Px, a.key);                                        // refused → callback queued for key K with A's incarnation
+    mesh._retire(a.key, 'pc-closed');                                   // A ends before the callback
+    node.deliverDoorSignal('ck', { kind: 'sdp-offer', sdp: 'v=0', attempt: 'KB' }); await tick(); await tick();
+    const b = mesh._peers.get(a.key);                                   // B occupies K (still negotiating)
+    check('H1 setup: B holds the same key with a different incarnation', b && b.attempt === 'KB' && b !== a.st && b.inc !== a.st.inc);
+    await tick(); await tick();                                         // A's refusal callback runs now
+    check('H2 the stale refusal callback leaves B alone (key replaced → skipped)', mesh._peers.get(a.key) === b && b.pc.closeCalls === 0);
+    node._sbRetired._ids.delete(idToHex(Px));
+    openDc(b); webrtc.bindPeer(Px, a.key); await tick();
+    check('H3 B binds and is admitted on that key afterwards', node._node.synaptome.has(Px) && webrtc.meshIdFor(Px) === a.key);
+    // the door: an older socket's close after the identity re-bound on a newer socket is not a death
+    const deaths = []; node._transport.onPeerDied((id, r, tok) => deaths.push({ id, r, tok }));
+    door.open.add('c1'); door.open.add('c2');
+    node._transport.bindPeer(Px ^ 1n, 'c1'); node._transport.bindPeer(Px ^ 1n, 'c2');   // re-bound on a newer connection
+    node._transport.handleConnClosed('c1');
+    check('H4 the door fires no death for a stale connection and keeps the newer binding', deaths.length === 0 && node._transport.connIdFor(Px ^ 1n) === 'c2');
+    node._transport.handleConnClosed('c2');
+    check('H5 the current connection\'s close is the death, with its connId as the token', deaths.length === 1 && deaths[0].tok === 'c2' && node._transport.connIdFor(Px ^ 1n) === null);
+    await node.stop();
+  }
+
   // ── G. statics ───────────────────────────────────────────────────────
   {
     const srv = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
