@@ -476,6 +476,11 @@ const GRADUATION_COOLDOWN_MS = parseInt(process.env.BRIDGE_GRADUATION_COOLDOWN_M
 const CLOSE_GRADUATED_HIGH   = MAX_PEERS + GRADUATION_SLACK;
 let   graduatedTotal  = 0;
 let   unboundKicked   = 0;   // admitted sockets closed for never binding an identity (CLOSE_UNAUTHENTICATED)
+let   turnRefreshOnlyTotal = 0;   // 2.155.0: credential-only re-dials served (welcome + 4200, no peer-list)
+// How long after the welcome a credential-only socket is released: long enough
+// for the frame to be written and read, short enough that the socket never
+// counts as a door seat (it is never announced and holds no identity).
+const TURN_REFRESH_RELEASE_MS = Number.parseInt(process.env.BRIDGE_TURN_REFRESH_RELEASE_MS ?? '250', 10);
 let   lastGraduationAt = 0;
 const graduatedRecently = new Map();   // nodeId hex → ts of last graduation (cooldown)
 
@@ -911,6 +916,7 @@ const httpServer = http.createServer((req, res) => {
           graduated: graduatedTotal,    // established peers released to free bridge slots
           unboundKickMs: UNBOUND_KICK_MS,
           unboundKicked,                // admitted sockets closed 4401 for never binding an identity
+          turnRefreshOnly: turnRefreshOnlyTotal,   // 2.155.0: credential-only re-dials served
         },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
@@ -1246,6 +1252,20 @@ wss.on('connection', (ws, req) => {
       turn,
     });
 
+    // 1b. 2.155.0: credential-only re-dial — the welcome above carried the
+    //     fresh TURN credential; that is the whole exchange. No peer-list, no
+    //     announce, no bootstrap hello. Release the socket with the graduation
+    //     code once the welcome has been written (the client, meshed above its
+    //     floor, keeps its mesh and does not reconnect).
+    if (conn.turnRefreshOnly) {
+      turnRefreshOnlyTotal++;
+      log('client-hello-turn-refresh', { connId: id, peerVersion: conn.peerVersion });
+      setTimeout(() => {
+        try { conn.ws.close(CLOSE_GRADUATED, 'turn credential refreshed — returning to graduated'); } catch { /* dying */ }
+      }, TURN_REFRESH_RELEASE_MS);
+      return;
+    }
+
     // 2. Introduce the newcomer to a BOUNDED, curated anchor set (W2 nursery)
     //    rather than the full admitted list — it self-expands via the mesh.
     //    BRIDGE_NURSERY=off, or too few eligible anchors, → full list.
@@ -1362,6 +1382,13 @@ wss.on('connection', (ws, req) => {
       // grouped by the connection handle's first two characters, a sequence
       // number).
       conn.claimedRegion = claimedRegion(msg);
+      // 2.155.0: a graduated client back for a TURN credential only (kernel
+      // 4.108.0 sends `intent: 'turn-refresh'`). It gets welcome with the
+      // credential and nothing else: no peer-list, no announce, no bootstrap
+      // hello, and the socket is released with 4200 once the welcome is
+      // written. Before this every graduate re-dialled as a newcomer every
+      // TTL − safety and dialled anchors it already held.
+      conn.turnRefreshOnly = (msg.intent === 'turn-refresh');
       if (!peerVersion) {
         logErr('client-hello-missing-version', { connId: id });
         try {

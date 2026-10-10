@@ -197,6 +197,7 @@ default here as a claim to check against the code, not the reverse.
 | **Idle reaping** | | |
 | `IDLE_TIMEOUT_MS` | `15000` | a connection silent this long is a ghost, its TCP dropped without a close frame, and is terminated |
 | `IDLE_CHECK_INTERVAL_MS` | `5000` | how often the idle sweep runs |
+| `BRIDGE_TURN_REFRESH_RELEASE_MS` | `250` | 2.155.0. A client-hello with `intent: 'turn-refresh'` (kernel ≥ 4.108.0, a graduate back for a TURN credential only) gets the welcome with the credential and nothing else — no peer-list, no announce, no bootstrap hello — and its socket is released with 4200 this long after the welcome. `/healthz` `nursery.turnRefreshOnly` counts them |
 | `BRIDGE_UNBOUND_KICK_MS` | `120000` | 2.154.0. An admitted socket that has not bound an identity (the authenticated hello over this socket) this long is closed 4401, a plain-disconnect code the kernel reconnects from. The idle sweep cannot see such a socket: it pongs. `0` = never. `/healthz` `nursery.unboundKicked` counts them |
 | **TURN** | | |
 | `TURN_AUTH_SECRET` | unset | shared secret for minting `use-auth-secret` credentials, also read by coturn. Unset = none minted |
