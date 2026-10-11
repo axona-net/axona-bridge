@@ -269,6 +269,19 @@ export class BridgeAxonaNode {
     // TTL-swept and its K-closest cache stays fresh.
     this._axon = this._engine.axonaManagerFor(this._node);
     this._axon?.start?.();
+    // R4 (Routed-Walk-Terminals v0.6, kernel 4.110.0): the bridge's node can
+    // SERVE when its AxonaManager is seated and not neverRoot — both production
+    // bridges run BRIDGE_NEVER_ROOT=0 and hold roles. A kernel older than R4
+    // never calls this; a kernel with R4 reads it to decide whether this node
+    // may be a routing terminal or birth a root. Without it the kernel takes
+    // its exception branch (treated capable, logged once), which is the same
+    // answer for a seated bridge and the wrong one for a neverRoot bridge.
+    this._composite.servingCapable = () => {
+      const a = this._axon;
+      if (!a || !this._node) return false;   // stopped: _node is nulled, _axon is not
+      try { return !!(typeof a.seated === 'function' ? a.seated() : true) && !a._neverRoot; }
+      catch { return false; }
+    };
 
     this._registerRouteMsgHandler();
 
