@@ -481,6 +481,15 @@ let   turnRefreshOnlyTotal = 0;   // 2.155.0: credential-only re-dials served (w
 // for the frame to be written and read, short enough that the socket never
 // counts as a door seat (it is never announced and holds no identity).
 const TURN_REFRESH_RELEASE_MS = Number.parseInt(process.env.BRIDGE_TURN_REFRESH_RELEASE_MS ?? '250', 10);
+// R5 (Routed-Walk-Terminals v0.6, 2.158.0): relayed signals are METERED per
+// socket per window. Above BRIDGE_SIGNAL_RATE in a window the excess is
+// dropped and logged once per window; the socket is NOT closed — a node that
+// cannot complete an offer is not a fault to punish, it is one that should
+// cost others less. 0 turns the meter off. The number comes from the 2026-10-11
+// east door: Chrome tabs ran 150–250 signals an hour, one Safari tab 5699.
+const SIGNAL_RATE      = Number.parseInt(process.env.BRIDGE_SIGNAL_RATE ?? '600', 10);
+const SIGNAL_WINDOW_MS = Number.parseInt(process.env.BRIDGE_SIGNAL_WINDOW_MS ?? '60000', 10);
+let   signalRateLimitedTotal = 0;   // relayed signals dropped by the meter (all sockets)
 let   lastGraduationAt = 0;
 const graduatedRecently = new Map();   // nodeId hex → ts of last graduation (cooldown)
 
@@ -917,6 +926,11 @@ const httpServer = http.createServer((req, res) => {
           unboundKickMs: UNBOUND_KICK_MS,
           unboundKicked,                // admitted sockets closed 4401 for never binding an identity
           turnRefreshOnly: turnRefreshOnlyTotal,   // 2.155.0: credential-only re-dials served
+        },
+        signals: {                                  // R5 (2.158.0): the per-socket relay meter
+          rateLimit:   SIGNAL_RATE,                 // relayed signals allowed per socket per window; 0 = off
+          windowMs:    SIGNAL_WINDOW_MS,
+          rateLimited: signalRateLimitedTotal,      // dropped by the meter since start, all sockets
         },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
@@ -1556,6 +1570,20 @@ wss.on('connection', (ws, req) => {
           // will receive `peer-left` and clean up on its own.
           logDebug('signal-drop-unknown-to', { connId: id, to });
           break;
+        }
+        // R5: the per-socket meter, counted on every relay attempt to a
+        // present recipient (door signals above and unknown recipients are not
+        // relays). One log line per window when the limit is first crossed.
+        if (SIGNAL_RATE > 0) {
+          const nowMs = Date.now();
+          if (!conn.sigWinStart || nowMs - conn.sigWinStart >= SIGNAL_WINDOW_MS) { conn.sigWinStart = nowMs; conn.sigWinCount = 0; conn.sigWinLogged = false; }
+          conn.sigWinCount = (conn.sigWinCount | 0) + 1;
+          if (conn.sigWinCount > SIGNAL_RATE) {
+            signalRateLimitedTotal++;
+            conn.signalsRateLimited = (conn.signalsRateLimited | 0) + 1;
+            if (!conn.sigWinLogged) { conn.sigWinLogged = true; log('signal-rate-limited', { connId: id, limit: SIGNAL_RATE, windowMs: SIGNAL_WINDOW_MS, dropped: 1 }); }
+            break;
+          }
         }
         const delivered = sendTo(to, {
           type:    'signal',
