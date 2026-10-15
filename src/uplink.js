@@ -57,6 +57,35 @@ export function meshDegreeFor(meshCap) {
   return Number.isFinite(meshCap) && meshCap > 0 ? { maxPeers: meshCap } : null;
 }
 
+/**
+ * TWO POOLS: parse BRIDGE_MESH_POOLS (`M=50,I=50,H=100[,pPending=..,cInbound=..,
+ * serveFloor=..,promoteMs=..,hostBudget=..,doorSockets=..]`). Absent/empty →
+ * null (not armed). Malformed → refused at start. With a mesh cap configured,
+ * M must equal it (one cap, one source; the kernel refuses the pair otherwise).
+ * doorSockets defaults to wsCap: the door's sockets live outside H.
+ */
+export function poolsFromEnv(env = process.env, { meshCap = undefined, wsCap = undefined } = {}) {
+  const raw = env.BRIDGE_MESH_POOLS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const out = {};
+  for (const part of String(raw).split(',')) {
+    const m = /^\s*([A-Za-z]+)\s*=\s*(-?\d+)\s*$/.exec(part);
+    if (!m) throw new Error(`arming refused: BRIDGE_MESH_POOLS ${JSON.stringify(raw)} is not a comma list of NAME=integer (got ${JSON.stringify(part)})`);
+    const key = m[1];
+    if (!['M', 'I', 'H', 'pPending', 'cInbound', 'serveFloor', 'promoteMs', 'hostBudget', 'doorSockets'].includes(key)) {
+      throw new Error(`arming refused: BRIDGE_MESH_POOLS names ${JSON.stringify(key)}, which the profile does not have`);
+    }
+    out[key] = Number.parseInt(m[2], 10);
+  }
+  if (out.M === undefined || out.I === undefined) throw new Error(`arming refused: BRIDGE_MESH_POOLS ${JSON.stringify(raw)} must name M and I`);
+  const cap = Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0;
+  if (cap > 0 && out.M !== cap) {
+    throw new Error(`arming refused: BRIDGE_MESH_POOLS M=${out.M} but the mesh cap (BRIDGE_MESH_MAX_PEERS / BRIDGE_MAX_PEERS) is ${cap} — one cap, one source`);
+  }
+  if (out.doorSockets === undefined && Number.isFinite(wsCap) && wsCap > 0) out.doorSockets = wsCap;
+  return out;
+}
+
 export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined, meshOnly = false }) {
   const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
   if (!upstream && !meshOnly) return null;
@@ -87,6 +116,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
   // this file has always run.
   const wsCap   = Number.parseInt(env.BRIDGE_MAX_PEERS ?? '32', 10);
   if (meshCap === undefined) meshCap = Number.parseInt(env.BRIDGE_MESH_MAX_PEERS ?? String(wsCap), 10);
+  // TWO POOLS (bridge 2.162.0; kernel 4.114.0): BRIDGE_MESH_POOLS, same
+  // grammar as the relay's RELAY_MESH_POOLS. Absent → not armed. The profile's
+  // M must equal the one mesh cap this bridge already runs (the kernel refuses
+  // two caps at construction), and the door's sockets are declared OUTSIDE H
+  // as doorSockets = BRIDGE_MAX_PEERS unless the profile names its own.
+  const meshPools = poolsFromEnv(env, { meshCap, wsCap });
   if (!upstream) {
     // Socket-is-bootstrap v0.5 (axona-docs 7a27d24): a SEED bridge with no
     // bridge above it still needs a mesh, because its newcomers dial it over
@@ -100,10 +135,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
       reconnect: false,
       autoHandshake: false,
       meshDegree: meshDegreeFor(meshCap),
+      meshPools,
       WebSocketImpl,
       log: (event, ctx) => log(`tx:${event}`, ctx),
     });
     log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap, meshOnly: true });
+    log('pools', meshPools ? { armed: true, ...meshPools, enforce: false } : { armed: false });
     log('selected', { upstream: null, meshOnly: true });
     return { transport, upstream: null, meshOnly: true };
   }
@@ -115,10 +152,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     // Inert when meshCap is 0 or unparseable — the kernel treats that as
     // unbounded, which is the pre-4.95.0 behaviour.
     meshDegree: meshDegreeFor(meshCap),
+    meshPools,
     WebSocketImpl,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });
   log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap });
+  log('pools', meshPools ? { armed: true, ...meshPools, enforce: false } : { armed: false });
 
   log('selected', { upstream });
   return { transport, upstream };
