@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.162.0**, embedding kernel **4.114.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.163.0**, embedding kernel **4.114.1** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -81,12 +81,12 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"2.162.0","kernelVersion":"4.114.0"}
+# {"status":"ok","version":"2.163.0","kernelVersion":"4.114.1"}
 
 curl -H "X-Healthz-Token: $HEALTHZ_TOKEN" http://localhost:8080/healthz
 # {"status":"ok","connections":…,"admitted":…,"pending":…,"minPeerVersion":"1.1.0",
 #  "minKernelVersion":"3.15.0","minPeerAppVersion":"3.15.0","uptimeS":…,
-#  "version":"2.162.0","kernelVersion":"4.114.0","nursery":{…},"axona":{…},
+#  "version":"2.163.0","kernelVersion":"4.114.1","nursery":{…},"axona":{…},
 #  "directory":{…},"uplink":{…},"meshDegree":{…},"admission":{…},"loop":{…}}
 ```
 
@@ -212,6 +212,7 @@ default here as a claim to check against the code, not the reverse.
 | `BRIDGE_MAX_PEERS` | `32` | admitted connections held before graduation begins. Production east runs `15` |
 | `BRIDGE_MESH_MAX_PEERS` | `= BRIDGE_MAX_PEERS` | the same bound on the bridge's own WebRTC mesh degree, so a bridge is not capped on one side and unbounded on the other. `0` disables the mesh cap alone; the production bridges' `/diag` reads `meshDegree.cap: 0` |
 | `BRIDGE_MESH_POOLS` | unset | TWO POOLS (kernel 4.114.0): `M=50,I=50,H=100` arms the managed / incoming pools on the bridge's mesh; `M` must equal the mesh cap above, the door's sockets are declared outside `H` as `doorSockets = BRIDGE_MAX_PEERS`. Unset = not armed (byte-identical to 4.113.0). Enforcement is the kernel ledger's `enforce`, still off: an armed bridge counts would-be refusals by class and refuses nothing |
+| `BRIDGE_LEDGER_ENFORCE` | unset | `1` turns the kernel channel ledger's bounds into refusals (with `BRIDGE_MESH_POOLS` armed: M, I, H, pPending, cInbound); unset keeps the kernel default, counting only. Production east and west run `1` since 2026-10-15 |
 | **Graduation** (close 4200 — "you are meshed; freeing the bridge slot") | | |
 | `BRIDGE_SOCKET_IS_BOOTSTRAP` | unset (off) | 2.152.0, kernel ≥ 4.107.0. ON: the door advertises a reserved id for the bridge itself first in every peer-list; a newcomer's WebRTC channel to the bridge replaces its socket (closed with 4200 once the channel has bound and a fresh `meshBound` ≥ the safe floor); at the mesh cap an eligible newcomer's bind retires one incumbent. Off: byte-identical to 2.151.0. Refuses to start a mesh on a kernel pin without the surfaces |
 | `BRIDGE_PROVISIONAL_MAX` | `20` | with the flag on: open door channels whose identity has not bound; the newest above it is retired |
@@ -309,7 +310,7 @@ axona-bridge/
 The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#<tag>`. To move the bridge to a new kernel, run the release ritual:
 
 ```bash
-scripts/repin-kernel.sh v4.114.0       # re-pin + lockfile + npm test gate + version bump + commit
+scripts/repin-kernel.sh v4.114.1       # re-pin + lockfile + npm test gate + version bump + commit
 ```
 
 It regenerates `package-lock.json` (the lock must track the pin), verifies the lockfile reproduces with `npm ci`, and **refuses to commit unless `npm test` (the embedded-peer smoke) passes** — then leaves push and deploy as deliberate manual steps. The bridge is one of about

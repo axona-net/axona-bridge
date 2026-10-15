@@ -86,6 +86,11 @@ export function poolsFromEnv(env = process.env, { meshCap = undefined, wsCap = u
   return out;
 }
 
+/** ENFORCEMENT (bridge 2.163.0): BRIDGE_LEDGER_ENFORCE=1 → meshLedger { enforce: true }; else null (kernel default, false). */
+export function ledgerFromEnv(env = process.env) {
+  return env.BRIDGE_LEDGER_ENFORCE === '1' ? { enforce: true } : null;
+}
+
 export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined, meshOnly = false }) {
   const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
   if (!upstream && !meshOnly) return null;
@@ -122,6 +127,8 @@ export async function buildUplink({ identity, env = process.env, book = null, se
   // two caps at construction), and the door's sockets are declared OUTSIDE H
   // as doorSockets = BRIDGE_MAX_PEERS unless the profile names its own.
   const meshPools = poolsFromEnv(env, { meshCap, wsCap });
+  const meshLedger = ledgerFromEnv(env);
+  const enforce = meshLedger?.enforce === true;
   if (!upstream) {
     // Socket-is-bootstrap v0.5 (axona-docs 7a27d24): a SEED bridge with no
     // bridge above it still needs a mesh, because its newcomers dial it over
@@ -135,12 +142,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
       reconnect: false,
       autoHandshake: false,
       meshDegree: meshDegreeFor(meshCap),
-      meshPools,
+      meshPools, meshLedger,
       WebSocketImpl,
       log: (event, ctx) => log(`tx:${event}`, ctx),
     });
     log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap, meshOnly: true });
-    log('pools', meshPools ? { armed: true, ...meshPools, enforce: false } : { armed: false });
+    log('pools', meshPools ? { armed: true, ...meshPools, enforce } : { armed: false, enforce });
     log('selected', { upstream: null, meshOnly: true });
     return { transport, upstream: null, meshOnly: true };
   }
@@ -152,12 +159,12 @@ export async function buildUplink({ identity, env = process.env, book = null, se
     // Inert when meshCap is 0 or unparseable — the kernel treats that as
     // unbounded, which is the pre-4.95.0 behaviour.
     meshDegree: meshDegreeFor(meshCap),
-    meshPools,
+    meshPools, meshLedger,
     WebSocketImpl,
     log: (event, ctx) => log(`tx:${event}`, ctx),
   });
   log('mesh-degree', { cap: Number.isFinite(meshCap) && meshCap > 0 ? meshCap : 0, wsCap });
-  log('pools', meshPools ? { armed: true, ...meshPools, enforce: false } : { armed: false });
+  log('pools', meshPools ? { armed: true, ...meshPools, enforce } : { armed: false, enforce });
 
   log('selected', { upstream });
   return { transport, upstream };
