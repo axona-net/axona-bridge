@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.166.0**, embedding kernel **4.117.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.167.0**, embedding kernel **4.118.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -81,12 +81,12 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"2.166.0","kernelVersion":"4.117.0"}
+# {"status":"ok","version":"2.167.0","kernelVersion":"4.118.0"}
 
 curl -H "X-Healthz-Token: $HEALTHZ_TOKEN" http://localhost:8080/healthz
 # {"status":"ok","connections":…,"admitted":…,"pending":…,"minPeerVersion":"1.1.0",
 #  "minKernelVersion":"3.15.0","minPeerAppVersion":"3.15.0","uptimeS":…,
-#  "version":"2.166.0","kernelVersion":"4.117.0","nursery":{…},"axona":{…},
+#  "version":"2.167.0","kernelVersion":"4.118.0","nursery":{…},"axona":{…},
 #  "directory":{…},"uplink":{…},"meshDegree":{…},"admission":{…},"loop":{…}}
 ```
 
@@ -191,7 +191,7 @@ default here as a claim to check against the code, not the reverse.
 | `MIN_KERNEL_VERSION` | `3.15.0` | the legacy flag-day kernel floor; below → close 4426 |
 | `MIN_PEER_VERSION` | `1.1.0` | floor on the client app's own `version`; 1.1.0 is the 264-bit node-id cutover |
 | `MIN_PEER_APP_VERSION` | `3.15.0` | floor for peer-app-versioned clients |
-| `STRICT_MIN_KERNEL` | unset | when set, close 4426 on any hello whose `kernelVersion` is missing or below it. Gates the exact kernel build, to isolate a single-kernel island. Unset = no gate |
+| `STRICT_MIN_KERNEL` | unset | when set, close 4426 on any hello whose `kernelVersion` is missing or below it. Gates the exact kernel build, to isolate a single-kernel island. Unset = no gate. Production and testnet set `4.118.0` since 2026-10-22: both pub/sub machines are on by default from that kernel, and a node that cannot honour a termination notice must not reach the door |
 | `HELLO_TIMEOUT_MS` | `5000` | how long to wait for a peer's authenticated hello before dropping it |
 | `FLEET_ALLOWLIST` | unset | comma-separated node ids. When set, admit only a cryptographically proven identity on the list. Unset = allow all, which is production |
 | **Idle reaping** | | |
@@ -310,7 +310,7 @@ axona-bridge/
 The kernel is pinned in `package.json` as `github:axona-net/axona-protocol#<tag>`. To move the bridge to a new kernel, run the release ritual:
 
 ```bash
-scripts/repin-kernel.sh v4.117.0       # re-pin + lockfile + npm test gate + version bump + commit
+scripts/repin-kernel.sh v4.118.0       # re-pin + lockfile + npm test gate + version bump + commit
 ```
 
 It regenerates `package-lock.json` (the lock must track the pin), verifies the lockfile reproduces with `npm ci`, and **refuses to commit unless `npm test` (the embedded-peer smoke) passes** — then leaves push and deploy as deliberate manual steps. The bridge is one of about
