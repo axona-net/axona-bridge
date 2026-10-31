@@ -101,11 +101,13 @@ export class BridgeAxonaNode {
     this._sbRetired  = this._sb.on ? new RecentlyRetired(this._sb.cooldownMs) : null;
     /** connIds whose door channel to this bridge has BOUND (rule 4 reads it). @type {Set<string>} */
     this._doorChannelBound = new Set();
+    /** Unsubscribes the composite route-change listener that marks a SWITCH to a door channel as bound (2.175.0). */
+    this._offRouteChanged = null;
     this._sbStats = {
       signalsIn: 0, signalsOut: 0, sinkDropsClosed: 0, offersRefusedCooldown: 0,
       switches: 0, bornSuperseded: 0, routeReplacement: 0,
       makeRoomRetires: 0, refused: { cooldown: 0, gate: 0, budget: 0, noVictim: 0 },
-      socketsClosedBootstrap: 0,
+      socketsClosedBootstrap: 0, doorBoundOnSwitch: 0,
     };
 
     this._identity  = null;
@@ -393,6 +395,18 @@ export class BridgeAxonaNode {
       return true;
     });
     this._composite.setBindPolicy?.((nodeId, sub, token) => this._bindPolicy(nodeId, sub, token));
+    // Rule 4 reads `_doorChannelBound`, and the bind policy marks it only on a
+    // NEW-route admission (composite verdict (a)). A client that said hello
+    // over the socket first and then bound its door channel is a SWITCH
+    // (verdict (b)): no policy runs there, so before 2.175.0 nothing marked
+    // it and the socket was never released — east read doorChannelsBound 0
+    // against routes.switched 20, twelve standing clients holding both the
+    // socket and the channel, sockets at the cap (2026-10-31). The composite
+    // announces every route change with the new token; a token that is one
+    // of OUR door keys means that door channel is now the identity's
+    // admitted route, which is what "bound" means to rule 4.
+    this._offRouteChanged?.();
+    this._offRouteChanged = this._composite.onRouteChanged?.((nodeId, token) => this._onRouteToDoor(nodeId, token)) ?? null;
     this._log('socket-bootstrap-wired', { epoch, reservedId: this._reservedId, provisionalMax: this._sb.provisionalMax, bindDeadlineMs: this._sb.bindDeadlineMs, makeRoomPerMin: this._sb.makeRoomPerMin, minKernel: this._sb.minKernel });
   }
 
@@ -409,6 +423,10 @@ export class BridgeAxonaNode {
    *   4. pass: the bind proceeds to the kernel's own admission (the commit
    *      the preflight predicted); the channel's bind deadline is cleared
    *      and the door learns the channel bound (rule 4 reads it).
+   *
+   * A SWITCH (socket hello first, door channel second) never reaches this
+   * policy: `_onRouteToDoor` marks it from the composite's route-change
+   * notice instead.
    *
    * A refusal closes the newcomer's own channel through the mesh transport
    * (unbind first, so no death is reported) and touches no incumbent.
@@ -467,6 +485,24 @@ export class BridgeAxonaNode {
     this._doorChannelBound.add(p.connId);
     this._log('door-channel-bound', { connId: p.connId, peer: idHex, how: pre.how });
     return true;
+  }
+
+  /**
+   * The composite's admitted route for `nodeId` moved to `token`. When the
+   * token is a door key of this epoch, that door channel is now the route:
+   * mark the connection bound (rule 4 reads it) and clear the channel's bind
+   * deadline, as the bind policy does for a channel-first admission. Any
+   * other token is not ours. Idempotent: a channel the policy already marked
+   * is left as it is.
+   */
+  _onRouteToDoor(nodeId, token) {
+    const p = parseDoorKey(token);
+    if (!p || p.epoch !== this._doorEpoch) return;
+    if (this._doorChannelBound.has(p.connId)) return;
+    try { this._meshTransport()?.mesh?.clearBindDeadline?.(token); } catch { /* no such key */ }
+    this._doorChannelBound.add(p.connId);
+    this._sbStats.doorBoundOnSwitch++;
+    this._log('door-channel-bound', { connId: p.connId, peer: idToHex(nodeId), how: 'route-switch' });
   }
 
   /**
@@ -589,6 +625,7 @@ export class BridgeAxonaNode {
   }
 
   async stop() {
+    this._offRouteChanged?.(); this._offRouteChanged = null;
     if (this._uplink)    { try { await this._uplink.transport.stop(); } catch { /* dying */ } }
     if (this._peer)      await this._peer.stop();
     if (this._transport) await this._transport.stop();

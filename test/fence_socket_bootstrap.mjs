@@ -23,7 +23,11 @@
 //      close evicts nothing; the channel's death evicts the identity.
 //   E. HELLO FIRST. A socket hello before the channel admits over the
 //      socket; the channel bind is a SWITCH (no re-admission, one entry);
-//      the socket close is swallowed; the mesh death evicts.
+//      the switch MARKS the door channel bound (rule 4 reads it; before
+//      2.175.0 only the bind policy marked, and a switch never runs it, so
+//      production released no socket: east doorChannelsBound 0 against
+//      routes.switched 20, 2026-10-31); the socket close is swallowed and
+//      forgets the mark; the mesh death evicts.
 //   F. MAKE ROOM AT BIND. The trigger is ABOVE the target with the newcomer
 //      counted: at cap 8, the eighth incumbent (count 8 = cap) admits with
 //      no retire (the 49→50 case); the ninth (count 9) retires ONE
@@ -38,7 +42,9 @@
 // death handler mark a superseded identity dead → D7; make the bind policy
 // skip gatePreflight → F6, F7; retire before the budget check → F4–F7, G6;
 // deliver reserved-id signals from an unadmitted connection → G1; count
-// provisional in the degree pass → D4 (kernel fence too). NOTE: removing the
+// provisional in the degree pass → D4 (kernel fence too); drop the
+// `_doorChannelBound.add` in _onRouteToDoor → E2c (run 2026-10-31: E2c
+// fails alone, 2.175.0). NOTE: removing the
 // born-superseded `return` in _completeHandshake is behaviourally
 // EQUIVALENT (the existing synaptome.has check already skips admission);
 // that return saves work and is not what protects the identity — the
@@ -243,8 +249,10 @@ async function newcomer(node, door, mesh, connId, attempt = 'A') {
     webrtc.bindPeer(P, key); await tick();
     check('E2 the channel bind is a SWITCH: one entry, route now the mesh, the door superseded', node._node.synaptome.size === size && node._composite.routeOf(P)?.sub === node._uplink.transport && node._composite.routeStats.switched === 1 && node._composite._routeFor(P) === node._uplink.transport);
     check('E2b a route replacement ran no make-room and no bind policy refusal', node._sbStats.makeRoomRetires === 0 && Object.values(node._sbStats.refused).every((n) => n === 0));
+    check('E2c the SWITCH marks the door channel bound (rule 4 reads it), once, with its bind deadline cleared', node.doorChannelBound('c7') === true && node.fillStatus().socketBootstrap.doorChannelsBound === 1 && node._sbStats.doorBoundOnSwitch === 1 && mesh._peers.get(key)?.bindTimer == null);
     door.open.delete('c7'); node.handleConnClosed('c7');
     check('E3 the socket close is swallowed', node._node.synaptome.has(P));
+    check('E3b the socket close forgets the bound mark: the mark was the socket\'s, the channel outlives it', node.doorChannelBound('c7') === false && node.fillStatus().socketBootstrap.doorChannelsBound === 0);
     mesh._retire(key, 'pc-closed'); await tick();
     check('E4 the mesh death evicts', !node._node.synaptome.has(P));
     await node.stop();
@@ -367,6 +375,9 @@ async function newcomer(node, door, mesh, connId, attempt = 'A') {
     const ch = bn.slice(bn.indexOf('async _completeHandshake('), bn.length);
     check('G5 _completeHandshake binds first, then skips admission for a born-superseded socket', ch.indexOf('this._transport.bindPeer(') < ch.indexOf('handshake-born-superseded') && ch.indexOf('handshake-born-superseded') < ch.indexOf('_addByVitality'));
     const bp = bn.slice(bn.indexOf('_bindPolicy(nodeId, sub, token) {'), bn.indexOf('deliverDoorSignal(connId, payload) {'));
+    const wd = bn.slice(bn.indexOf('_wireDoorMesh(t) {'), bn.indexOf('_bindPolicy(nodeId, sub, token) {'));
+    const rd = bn.slice(bn.indexOf('_onRouteToDoor(nodeId, token) {'), bn.indexOf('deliverDoorSignal(connId, payload) {'));
+    check('G7 the door subscribes to the composite\'s route changes, and the handler marks only a door key of its own epoch', /this\._composite\.onRouteChanged\?\.\(/.test(wd) && /parseDoorKey\(token\)/.test(rd) && /p\.epoch !== this\._doorEpoch\) return;/.test(rd) && rd.indexOf('parseDoorKey(token)') < rd.indexOf('_doorChannelBound.add'));
     check('G6 the bind policy orders cooldown → gatePreflight → budget → dry-run victim → retire, and never touches an incumbent on refusal', bp.indexOf('hasIdentity') < bp.indexOf('gatePreflight') && bp.indexOf('gatePreflight') < bp.indexOf('_sbBudget.ok') && bp.indexOf('_sbBudget.ok') < bp.indexOf('dryRun: true') && bp.indexOf('dryRun: true') < bp.indexOf('mesh.retireForNewcomer(token);'));
   }
 
