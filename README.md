@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.175.0**, embedding kernel **4.125.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.176.0**, embedding kernel **4.125.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -81,12 +81,12 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"2.175.0","kernelVersion":"4.125.0"}
+# {"status":"ok","version":"2.176.0","kernelVersion":"4.125.0"}
 
 curl -H "X-Healthz-Token: $HEALTHZ_TOKEN" http://localhost:8080/healthz
 # {"status":"ok","connections":…,"admitted":…,"pending":…,"minPeerVersion":"1.1.0",
 #  "minKernelVersion":"3.15.0","minPeerAppVersion":"3.15.0","uptimeS":…,
-#  "version":"2.175.0","kernelVersion":"4.125.0","nursery":{…},"axona":{…},
+#  "version":"2.176.0","kernelVersion":"4.125.0","nursery":{…},"axona":{…},
 #  "directory":{…},"uplink":{…},"meshDegree":{…},"admission":{…},"loop":{…}}
 ```
 
@@ -220,6 +220,12 @@ default here as a claim to check against the code, not the reverse.
 | `BRIDGE_MAKE_ROOM_PER_MIN` | `4` | with the flag on: incumbent retires per sliding minute; above it a newcomer at cap is refused as a relay refuses |
 | `BRIDGE_SOCKET_BOOTSTRAP_MIN_KERNEL` | `4.107.0` | with the flag on: clients below this kernel are never offered the reserved id |
 | `BRIDGE_SOCKET_BOOTSTRAP_COOLDOWN_MS` | `60000` | with the flag on: a retired identity is refused a bind, and its connection a new negotiation to the reserved id, for this long |
+| `BRIDGE_GRADUATED_SAMPLE` | unset (off) | 2.176.0, P1.a of "The introduction represents the mesh, not the socket" v0.1 (axona-docs c7b0230). ON: the bridge keeps a REGISTRY of the ids it has graduated, for `L_reg`, bounded at `M_reg`, and every `peer-list` carries `graduated`, a field of its own with `R_sample` ids drawn uniformly without replacement, never in `peers`. A kernel at 4.128.0 or later nominates the sample into its candidate cache as source `directory` and the fill dials under its budget; the mesh never dials the field; an older kernel ignores it. The operator `/healthz` reports `graduatedSample` (size and counters, never an id). Off: byte-identical to 2.175.0. The registry is bootstrap state and does not survive a restart |
+| `BRIDGE_GRADUATED_R_SAMPLE` | `16` | with the flag on: ids per peer-list; may not exceed `M_reg` |
+| `BRIDGE_GRADUATED_L_REG_MS` | `86400000` | with the flag on: a registered id expires after this (24 h); it is never refreshed; a re-graduation is a new registration |
+| `BRIDGE_GRADUATED_M_REG` | `4096` | with the flag on: registry bound; the oldest registration is evicted above it (about 270 KB of ids) |
+| `BRIDGE_GRADUATION_GATE` | unset (off) | 2.176.0, P1.b of the same packet. ON: a peer is graduated on vitality or uptime only if its introduction REACHED outside its cohort — an anchor admitted more than `BRIDGE_COHORT_MS` before it, a `graduated` id on its list, or (door on) a bound channel to this bridge. Failing all three it is held until `BRIDGE_GRADUATION_MAX_NURSERY_MS`, then graduated anyway with a `graduated-cohort-only` log line naming the cohort's size. The operator `/healthz` reports `graduationGate` (`held`, `cohortOnlyGraduated`). No kernel or wire change. Off: byte-identical |
+| `BRIDGE_COHORT_MS` | `60000` | with the gate on: two admissions within this of each other are one cohort (`T_cohort`) |
 | `BRIDGE_GRADUATION_MIN_UPTIME_MS` | `30000` | a peer must be this old before it can be graduated |
 | `BRIDGE_GRADUATION_MIN_KERNEL` | `4.35.0` | only clients that honour close 4200 are graduated; older ones count toward the cap and are never dropped |
 | `BRIDGE_GRADUATION_SAFE_FLOOR` | `4` | minimum reported `meshBound` to be eligible — one above the client's own floor of 3 |

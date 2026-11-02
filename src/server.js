@@ -51,6 +51,7 @@ import { BridgeBookStore } from './bridge_book_store.js';
 import { idToHex }         from './identity.js';
 import { selectAnchors, orderSameRegionFirst, claimedRegion } from './anchor_select.js';
 import { selectGraduate }  from './graduation_select.js';
+import { resolveGraduatedSample, GraduatedRegistry } from './graduated_registry.js';
 import { installKernelLog, kernelLogOn, latTraceOn, safeContext } from './kernel_log.js';
 import { KERNEL_VERSION, makeNonce } from '@axona/protocol';
 // The discharge threshold a role's lastReplicaAgeMs is read against. Shipped on
@@ -492,6 +493,49 @@ const SIGNAL_WINDOW_MS = Number.parseInt(process.env.BRIDGE_SIGNAL_WINDOW_MS ?? 
 let   signalRateLimitedTotal = 0;   // relayed signals dropped by the meter (all sockets)
 let   lastGraduationAt = 0;
 const graduatedRecently = new Map();   // nodeId hex → ts of last graduation (cooldown)
+// P1.a (axona-docs c7b0230, "The introduction represents the mesh, not the
+// socket" v0.1; David 2026-11-02 "Proceed with Q1-Q4"): the bridge REMEMBERS
+// the ids it graduated for L_reg, bounded at M_reg, and every peer-list
+// carries R_sample of them in a field of its own, `graduated`, never in
+// `peers`. Resolved here so a typo refuses at start, not at the first list.
+// Off (default): no registry is kept and no frame changes — 2.175.0 bytes.
+const GRADUATED_SAMPLE = resolveGraduatedSample(process.env);
+const graduatedRegistry = GRADUATED_SAMPLE.on ? new GraduatedRegistry({ lRegMs: GRADUATED_SAMPLE.lRegMs, mReg: GRADUATED_SAMPLE.mReg }) : null;
+function noteGraduated(nh, now) { if (graduatedRegistry && nh) graduatedRegistry.note(nh, now); }
+// P1.b (same packet): the GRADUATION GATE. A newcomer is graduated on
+// vitality or uptime only if its introduction REACHED outside its cohort: an
+// anchor admitted more than T_cohort before it, or a `graduated` id on its
+// list, or (door on) a bound channel to this bridge. Failing all three it is
+// held until the nursery ceiling, then graduated anyway with a
+// `graduated-cohort-only` line naming the cohort's size. Own flag, default
+// off; no kernel change, no wire change. T_cohort 60 s is Q3's value.
+const GRADUATION_GATE_ON = ['1', 'on', 'true', 'yes'].includes(String(process.env.BRIDGE_GRADUATION_GATE ?? '').trim().toLowerCase());
+const COHORT_MS = (() => { const raw = process.env.BRIDGE_COHORT_MS; if (raw === undefined) return 60000; if (!/^[0-9]+$/.test(raw) || parseInt(raw, 10) <= 0) throw new TypeError(`BRIDGE_COHORT_MS: must be a positive integer, got ${JSON.stringify(raw)}`); return parseInt(raw, 10); })();
+let   gateHeldTotal = 0;          // graduation candidates skipped because their introduction never left their cohort
+let   cohortOnlyGraduated = 0;    // graduated at the ceiling with a cohort-only introduction
+/** The bridge's own record of what it introduced this connection to. */
+function recordIntroduction(conn, admittedPeers, graduatedListed) {
+  let older = false;
+  for (const aid of admittedPeers) {
+    const ac = connections.get(aid);
+    if (ac && ac.admitted && conn.since - ac.since > COHORT_MS) { older = true; break; }
+  }
+  const prev = conn.intro || { anchorsOlderThanCohort: false, graduatedListed: false };
+  conn.intro = { anchorsOlderThanCohort: prev.anchorsOlderThanCohort || older, graduatedListed: prev.graduatedListed || graduatedListed };
+}
+/** True when the connection's introduction reached outside its own window. */
+function introducedOutsideCohort(connId, conn) {
+  const i = conn.intro;
+  if (i && (i.anchorsOlderThanCohort || i.graduatedListed)) return true;
+  if (bridgeNode.socketBootstrapOn?.() && bridgeNode.doorChannelBound?.(connId)) return true;
+  return false;
+}
+/** How many admitted connections arrived within T_cohort of this one, itself included. */
+function cohortSizeOf(conn) {
+  let n = 0;
+  for (const c of connections.values()) if (c.admitted && Math.abs(c.since - conn.since) <= COHORT_MS) n++;
+  return n;
+}
 
 // ── Structured JSON logging ──────────────────────────────────────────
 function log(event, extra = {}) {
@@ -626,7 +670,21 @@ function maybeGraduate() {
     };
   });
 
-  const pick = selectGraduate(candidates, {
+  // P1.b: a candidate whose introduction never left its cohort is HELD until
+  // the nursery ceiling (the ceiling basis is exempt); it is not a candidate
+  // for vitality or uptime graduation. The gate reads the bridge's own
+  // records only (recordIntroduction, the door's bound mark).
+  const cohortOnly = new Set();
+  const gated = !GRADUATION_GATE_ON ? candidates : candidates.filter(cand => {
+    const c = connections.get(cand.id);
+    if (!c || introducedOutsideCohort(cand.id, c)) return true;
+    cohortOnly.add(cand.id);
+    if (now - c.since >= GRADUATION_MAX_NURSERY_MS) return true;   // ceiling: graduates anyway, logged below
+    gateHeldTotal++;
+    return false;
+  });
+
+  const pick = selectGraduate(gated, {
     now,
     safeFloor:    GRADUATION_SAFE_FLOOR,
     minUptimeMs:  GRADUATION_MIN_UPTIME_MS,
@@ -639,9 +697,11 @@ function maybeGraduate() {
   const nh = connNodeHex(pick.id);
   try { c.ws.close(CLOSE_GRADUATED, 'graduated — you are meshed; freeing the bridge slot'); } catch { /* dying */ }
   if (nh) graduatedRecently.set(nh, now);
+  noteGraduated(nh, now);
   lastGraduationAt = now;
   graduatedTotal++;
   log('peer-graduated', { connId: pick.id, uptimeMs: now - c.since, kernelVersion: c.kernelVersion, region: pick.region, meshBound: pick.meshBound, basis: pick.basis, admitted: admitted.length });
+  if (cohortOnly.has(pick.id)) { cohortOnlyGraduated++; log('graduated-cohort-only', { connId: pick.id, cohort: cohortSizeOf(c), uptimeMs: now - c.since, basis: pick.basis }); }
   // Prune the cooldown map so it can't grow without bound.
   if (graduatedRecently.size > 1000) for (const [k, t] of graduatedRecently) if (now - t > GRADUATION_COOLDOWN_MS) graduatedRecently.delete(k);
 }
@@ -672,6 +732,7 @@ function maybeCloseBootstrapSocket(connId) {
   const nh = connNodeHex(connId);
   try { c.ws.close(CLOSE_GRADUATED, 'bootstrap complete — your channel to this bridge is bound; freeing the socket'); } catch { /* dying */ }
   if (nh) graduatedRecently.set(nh, now);
+  noteGraduated(nh, now);
   bootstrapSocketsClosed++;
   bridgeNode.noteBootstrapSocketClosed?.(connId);
   log('socket-released-bootstrap', { connId, uptimeMs: now - c.since, meshBound: mb, kernelVersion: c.kernelVersion });
@@ -932,6 +993,12 @@ const httpServer = http.createServer((req, res) => {
           windowMs:    SIGNAL_WINDOW_MS,
           rateLimited: signalRateLimitedTotal,      // dropped by the meter since start, all sockets
         },
+        // P1.a / P1.b (axona-docs c7b0230): the registry's SIZE and counters,
+        // never an id (v0.1 § Privacy); the gate's counters. Operator-only.
+        graduatedSample: graduatedRegistry
+          ? { on: true, rSample: GRADUATED_SAMPLE.rSample, ...graduatedRegistry.status() }
+          : { on: false },
+        graduationGate: { on: GRADUATION_GATE_ON, cohortMs: COHORT_MS, held: gateHeldTotal, cohortOnlyGraduated },
         axona: {
           nodeId:         idToHex(bridgeNode.nodeId),
           region:         bridgeNode.identity.region.label,
@@ -1330,7 +1397,14 @@ wss.on('connection', (ws, req) => {
     // The client dials it as it dials any peer-list entry (mesh.js:706).
     const selfRid = bridgeNode.reservedIdFor?.(conn) ?? null;
     if (selfRid) admittedPeers = [selfRid, ...admittedPeers];
-    sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+    // P1.a: the sample of the graduated rides in ITS OWN field; `peers` stays
+    // connection handles. The newcomer's own id is excluded when the bridge
+    // already knows it (a list sent before the hello binds cannot exclude).
+    const graduatedSample = graduatedRegistry ? graduatedRegistry.sample(GRADUATED_SAMPLE.rSample, { exclude: connNodeHex(id) }) : [];
+    recordIntroduction(conn, admittedPeers, graduatedSample.length > 0);
+    sendTo(id, graduatedSample.length
+      ? { type: 'peer-list', peers: admittedPeers, graduated: graduatedSample, serverT: Date.now() }
+      : { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
 
     // 3. Tell existing admitted peers that someone new arrived.
     const announcedTo = broadcast(
@@ -1490,8 +1564,12 @@ wss.on('connection', (ws, req) => {
         // (the client's mesh skips an id it already holds).
         const selfRid = bridgeNode.reservedIdFor?.(conn) ?? null;
         if (selfRid) admittedPeers.unshift(selfRid);
-        sendTo(id, { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
-        log('peer-list-rerequest', { connId: id, peers: admittedPeers.length });
+        const graduatedSample = graduatedRegistry ? graduatedRegistry.sample(GRADUATED_SAMPLE.rSample, { exclude: connNodeHex(id) }) : [];
+        recordIntroduction(conn, admittedPeers, graduatedSample.length > 0);
+        sendTo(id, graduatedSample.length
+          ? { type: 'peer-list', peers: admittedPeers, graduated: graduatedSample, serverT: Date.now() }
+          : { type: 'peer-list', peers: admittedPeers, serverT: Date.now() });
+        log('peer-list-rerequest', { connId: id, peers: admittedPeers.length, graduated: graduatedSample.length });
         break;
       }
 
