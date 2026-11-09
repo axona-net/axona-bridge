@@ -165,6 +165,60 @@ export class BridgeEngine {
       // reporting the kernel's durability and forward-verdict machinery reads.
       verdictsSupported: true,
       findKClosest:    (...args) => peer.findKClosest(...args),
+      // neighbors + lookup (2.183.0; David 2026-11-09: "give the bridge adapter
+      // neighbors and lookup"). The kernel guards three root mechanisms on
+      // these two functions and skips each one without a word when the adapter
+      // lacks them: selfClosestReachable compares nobody (any subscription
+      // unattached for ROOT_CLAIM_MS claims root), _emitRootBeacons returns (a
+      // bridge root announces to no one), _verifyRoots returns (a bridge root
+      // never checks its own claim). On 2026-11-09 both production bridges
+      // held a root of axona:bridge-directory @ grizzly beside the relay root
+      // each of them had a socket to, and east logged zero verify rows in 72 h.
+      //
+      // neighbors: every node this bridge holds an OPEN CHANNEL to, as BigInts.
+      // The kernel's own adapter (AxonaPeer.js) reads transport.boundPeers() and
+      // falls back to the synaptome only when that is empty. Here the socket
+      // transport reports bound peers only when bridge fill is armed
+      // (ws_transport.js reportBound), so on an unarmed bridge boundPeers()
+      // holds the uplink's peers alone and the socket peers would be missing.
+      // This reads both: the bound set, plus every synaptome entry the
+      // transport answers isConnected for. A synaptome entry with no open
+      // channel is NOT a neighbour: the kernel sends beacons to this list and
+      // reads "is the root reachable" from it.
+      neighbors: () => {
+        const out = new Set();
+        const t = node.transport;
+        try {
+          if (t && typeof t.boundPeers === 'function') {
+            for (const p of t.boundPeers()) if (typeof p === 'bigint') out.add(p);
+          }
+        } catch { /* best-effort: a throwing sub-transport contributes nothing */ }
+        try {
+          if (t && typeof t.isConnected === 'function') {
+            for (const syn of node.synaptome?.values?.() ?? []) {
+              const id = syn?.peerId;
+              if (typeof id === 'bigint' && !out.has(id) && t.isConnected(id)) out.add(id);
+            }
+          }
+        } catch { /* best-effort */ }
+        out.delete(self);
+        return [...out];
+      },
+      // lookup: the iterative network search, in the shape the kernel's
+      // consumers read: { found, path, hops, time } with the closest node LAST
+      // (same body as the kernel adapter; an adapter that returned a bare id
+      // made every r.path consumer a no-op, kernel Task #354). findKClosest
+      // above is already that search on a bridge, so this is the same call at
+      // K = 4 with the result wrapped.
+      lookup: async (targetIdBig) => {
+        if (typeof targetIdBig !== 'bigint') return null;
+        try {
+          const arr = await peer.findKClosest(targetIdBig, 4);
+          if (!Array.isArray(arr) || arr.length === 0) return { found: false, path: [], hops: 0, time: 0 };
+          const path = arr.slice().reverse();            // ascending distance → terminus last
+          return { found: true, path, hops: path.length - 1, time: 0 };
+        } catch { return { found: false, path: [], hops: 0, time: 0 }; }
+      },
       routeMessage:    (...args) => peer.routeMessage(...args),
       sendDirect:      async (peerId, type, payload) => {
         if (peerId === self) {
