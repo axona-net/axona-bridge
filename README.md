@@ -2,7 +2,7 @@
 
 WebSocket signaling broker for the [Axona](https://github.com/axona-net) protocol. A new peer connects here first; the bridge tells it about every other connected peer, and announces the new arrival to everyone else. The peers then negotiate WebRTC DataChannels through the bridge, after which they talk directly without going through it. The bridge also responds to direct pings as itself, so it shows up in each peer's UI as one of the lights in the mesh.
 
-**v2.182.0**, embedding kernel **4.131.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
+**v2.183.0**, embedding kernel **4.131.0** (wire **4.0**, `axona/5` authenticated handshake; the pinned kernel version is in `package.json` and served live at `/healthz`). It runs an embedded `AxonaPeer` from [`@axona/protocol`](https://github.com/axona-net/axona-protocol) and acts as a server-class **highway** node in the network — persistent identity, larger synaptome cap, a routable target for any browser peer's lookups, and, with `BRIDGE_NEVER_ROOT=0` as the production bridges run, an ordinary root for region-keyed pub/sub (see [the section on roots](#roots-and-bridge_never_root) below). The bridge is **bootstrap-only, not a data path**: peers that are already meshed can form new links with the bridge process dead (peer-relayed signaling), so it strengthens the network without owning it.
 
 ## Run your own bridge
 
@@ -81,12 +81,12 @@ Quick health check (reports the embedded kernel version):
 
 ```bash
 curl http://localhost:8080/healthz
-# {"status":"ok","version":"2.182.0","kernelVersion":"4.131.0"}
+# {"status":"ok","version":"2.183.0","kernelVersion":"4.131.0"}
 
 curl -H "X-Healthz-Token: $HEALTHZ_TOKEN" http://localhost:8080/healthz
 # {"status":"ok","connections":…,"admitted":…,"pending":…,"minPeerVersion":"1.1.0",
 #  "minKernelVersion":"3.15.0","minPeerAppVersion":"3.15.0","uptimeS":…,
-#  "version":"2.182.0","kernelVersion":"4.131.0","nursery":{…},"axona":{…},
+#  "version":"2.183.0","kernelVersion":"4.131.0","nursery":{…},"axona":{…},
 #  "directory":{…},"uplink":{…},"meshDegree":{…},"admission":{…},"loop":{…}}
 ```
 
@@ -365,6 +365,20 @@ bridge roots like any other node and the strand does not occur.
 That is [axona-protocol#69](https://github.com/axona-net/axona-protocol/issues/69), and it
 is still OPEN. The kernel-side fix — a node able to tell its neighbours it never holds a
 role, so they stop choosing it — does not exist yet.
+
+Until 2.183.0 a bridge with the fence off was an ordinary root in ONE respect: it could
+take the role. The pub/sub adapter the bridge hands the kernel had no `neighbors` and no
+`lookup`, and the kernel skips a mechanism whose adapter function is missing. A bridge
+claimed a root without comparing itself to a neighbour. It announced that root to no
+one. It never checked its own claim. On 2026-11-09 both production bridges held a root
+of `axona:bridge-directory @ grizzly` beside the relay root each of them had a socket
+to. Since 2.183.0 the adapter answers both (`src/bridge_engine.js`, `axonFor`).
+`neighbors` is every node the bridge holds an OPEN CHANNEL to, socket or WebRTC; a
+synaptome entry with no open channel is not listed. A bridge with no open channel reads
+as mesh-bare and serves no root until it has one. `lookup` is the bridge's network
+search at K = 4. Still absent from the adapter: `walk`, `bridgeId`, `isCapable` and
+`reintegrate`, so the walk-assisted verify and the mesh re-warm stay off on a bridge.
+Fenced by `test/fence_adapter_neighbors_lookup.mjs`.
 
 So the default is NOT what production runs, and the difference matters to anyone who
 runs a public bridge. A bridge on the default joins the shared network as a foreign
