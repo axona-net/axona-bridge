@@ -64,6 +64,28 @@ export function assertArmingCoherent(armedEnvs) {
 }
 
 /**
+ * BRIDGE_NO_CHANNEL_TICKS → a positive integer, or 0 when absent (OFF).
+ * Refuses a value that is not a positive integer in digits, and refuses the
+ * setting without the maintain tick it rides on.
+ */
+export function resolveNoChannelTicks(env = process.env, armMaintain = env.BRIDGE_SYNAPTOME_MAINTAIN === '1') {
+  const raw = env.BRIDGE_NO_CHANNEL_TICKS;
+  if (raw === undefined || raw === '') return 0;
+  const n = strictCap(raw);
+  if (n === null) {
+    throw new Error(
+      `arming refused: BRIDGE_NO_CHANNEL_TICKS is ${JSON.stringify(raw)} — it must be a positive integer written in digits ` +
+      `(the number of consecutive maintain ticks before a table member with no channel is put through the death path). Unset it to leave the sweep OFF.`);
+  }
+  if (!armMaintain) {
+    throw new Error(
+      `arming refused: BRIDGE_NO_CHANNEL_TICKS=${n} set without BRIDGE_SYNAPTOME_MAINTAIN=1 — the sweep runs inside the maintain tick ` +
+      `and would never run. Set BRIDGE_SYNAPTOME_MAINTAIN=1 (with the guard and the gate), or unset BRIDGE_NO_CHANNEL_TICKS.`);
+  }
+  return n;
+}
+
+/**
  * Resolve the embedded peer's arming from the environment.
  * @returns {{ armedEnvs: string[], armed: boolean, options: object, cap: number|null, meshCap: number }}
  */
@@ -86,15 +108,24 @@ export function resolveFillArming(env = process.env) {
     }
   }
 
+  // No-Channel Sweep (kernel 4.132.0, council eb305550 / 2220290e): N maintain
+  // ticks a table member may read "not connected, nothing in flight" before
+  // the kernel raises its missing death. It rides the maintain tick, so it is
+  // read ONLY with BRIDGE_SYNAPTOME_MAINTAIN=1; set without it, or written as
+  // anything but a positive integer in digits, the bridge refuses to start
+  // (an arming that silently does nothing reads as armed). Absent: OFF, and
+  // the options below are byte-identical to 2.182.0.
+  const noChannelTicks = resolveNoChannelTicks(env, armMaintain);
+
   // The relay launcher's constants (axona-relay/src/relay.js armingFromEnv),
   // so a bridge fills exactly as a relay does.
   const options = {
-    ...(armMaintain ? { synaptomeMaintain: { kNear: 5, intervalMs: 15000, maxPerTick: 3 } } : {}),
+    ...(armMaintain ? { synaptomeMaintain: { kNear: 5, intervalMs: 15000, maxPerTick: 3, ...(noChannelTicks ? { noChannelTicks } : {}) } } : {}),
     ...(armGate     ? { admissionGate: { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } } : {}),
     ...(armGuard    ? { attemptGuard: { maxAttempts: 4, baseMs: 30000, factor: 2, refillWindowMs: 60000, deficitBaseMs: 30000, deficitFactor: 2 } } : {}),
   };
 
-  return { armedEnvs, armed, options, cap, meshCap: armed ? cap : legacyMeshCap(env) };
+  return { armedEnvs, armed, options, cap, meshCap: armed ? cap : legacyMeshCap(env), noChannelTicks };
 }
 
 /** Post-construction proof that every requested module LANDED on the peer (ported from relay.js). */

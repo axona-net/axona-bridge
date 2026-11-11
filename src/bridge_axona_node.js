@@ -593,6 +593,16 @@ export class BridgeAxonaNode {
         pendingAllocations: ledger?.outboundPending ?? null,
       },
       socketBootstrap: this.socketBootstrapStatus(),
+      // 2.184.0: the No-Channel Sweep (kernel 4.132.0). `ticks` is what the
+      // environment asked for (0 = OFF), `effective` what landed on the peer
+      // (null on a kernel that has no such option), `last` the latest tick's
+      // counts, `swept` the lifetime total. Null means "not available here".
+      noChannel: {
+        ticks:     this._arming.noChannelTicks ?? 0,
+        effective: peer?._maintainCfg?.noChannelTicks ?? null,
+        last:      peer?._noChannelLast ? { ...peer._noChannelLast } : null,
+        swept:     peer?._noChannelSwept ?? null,
+      },
     };
   }
 
