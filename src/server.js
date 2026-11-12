@@ -38,7 +38,7 @@
 // =====================================================================
 
 import { WebSocketServer } from 'ws';
-import { bootMeshMode } from './socket_bootstrap.js';
+import { bootMeshMode, bootstrapSocketVerdict, CLOSE_RETIRED_MIN_KERNEL_DEFAULT } from './socket_bootstrap.js';
 import crypto from 'crypto';
 import http   from 'http';
 import net    from 'node:net';
@@ -720,23 +720,33 @@ setInterval(maybeGraduate, GRADUATION_INTERVAL_MS).unref?.();
  * report qualifies or ordinary graduation takes it. Off unless the bridge
  * node runs with the flag. Called on every heartbeat.
  */
+const CLOSE_RETIRED_MIN_KERNEL = process.env.BRIDGE_CLOSE_RETIRED_MIN_KERNEL ?? CLOSE_RETIRED_MIN_KERNEL_DEFAULT;
 let bootstrapSocketsClosed = 0;
 function maybeCloseBootstrapSocket(connId) {
   if (!bridgeNode.socketBootstrapOn?.()) return false;
   const c = connections.get(connId);
   if (!c || !c.admitted) return false;
-  if (!bridgeNode.doorChannelBound?.(connId)) return false;
   const now = Date.now();
   const mb = freshMeshBound(c, now);
-  if (mb == null || mb < GRADUATION_SAFE_FLOOR) return false;
-  if (!gteVersion(c.kernelVersion || c.peerVersion || '0.0.0', GRADUATION_MIN_KERNEL)) return false;
+  // Close a Retired Socket (2.189.0; David 2026-11-12): the decision is the
+  // pure bootstrapSocketVerdict. A client on a kernel at or above
+  // CLOSE_RETIRED_MIN_KERNEL has its retired socket closed whatever its mesh
+  // size; an older one keeps the floor rule.
+  const verdict = bootstrapSocketVerdict({
+    kernelVersion: c.kernelVersion || c.peerVersion || '0.0.0',
+    retired: bridgeNode.socketRetired?.(connId) === true,
+    doorBound: bridgeNode.doorChannelBound?.(connId) === true,
+    meshBound: mb, safeFloor: GRADUATION_SAFE_FLOOR,
+    graduationMinKernel: GRADUATION_MIN_KERNEL, closeRetiredMinKernel: CLOSE_RETIRED_MIN_KERNEL,
+  });
+  if (!verdict.close) return false;
   const nh = connNodeHex(connId);
   try { c.ws.close(CLOSE_GRADUATED, 'bootstrap complete — your channel to this bridge is bound; freeing the socket'); } catch { /* dying */ }
   if (nh) graduatedRecently.set(nh, now);
   noteGraduated(nh, now);
   bootstrapSocketsClosed++;
   bridgeNode.noteBootstrapSocketClosed?.(connId);
-  log('socket-released-bootstrap', { connId, uptimeMs: now - c.since, meshBound: mb, kernelVersion: c.kernelVersion });
+  log('socket-released-bootstrap', { connId, uptimeMs: now - c.since, meshBound: mb, kernelVersion: c.kernelVersion, why: verdict.why });
   return true;
 }
 

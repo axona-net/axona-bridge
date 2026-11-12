@@ -529,6 +529,8 @@ export class BridgeAxonaNode {
 
   /** Has this connection's channel to the bridge bound? (rule 4) */
   doorChannelBound(connId) { return this._doorChannelBound.has(connId); }
+  /** Close a Retired Socket (2.189.0): the door socket's route for its identity is superseded. */
+  socketRetired(connId) { return this._transport?.isRetired?.(connId) === true; }
 
   /** server.js: the socket closed with 4200 because the channel bound. */
   noteBootstrapSocketClosed(connId) { this._sbStats.socketsClosedBootstrap++; this._log('door-socket-released', { connId }); }

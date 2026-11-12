@@ -161,6 +161,10 @@ export class WebSocketTransport extends Transport {
   get isBootstrap() { return true; }
 
   supersedePeer(nodeId) {
+    // Close a Retired Socket (2.189.0): remember WHICH connection was retired,
+    // so the bridge can close it. Cleared when that connection closes.
+    const retiredConn = this._connIdByNodeId.get(nodeId);
+    if (retiredConn != null) (this._retiredConns ??= new Set()).add(retiredConn);
     let n = 0;
     for (const [id, p] of this._pending.entries()) {
       if (p.nodeId !== nodeId) continue;
@@ -171,6 +175,9 @@ export class WebSocketTransport extends Transport {
     }
     this._log('route-superseded', { nodeId: nodeId.toString(16), rejected: n });
   }
+
+  /** Close a Retired Socket (2.189.0): was this connection's route superseded? */
+  isRetired(connId) { return this._retiredConns?.has(connId) === true; }
 
   // ── Channel pool ─────────────────────────────────────────────────
 
@@ -351,6 +358,7 @@ export class WebSocketTransport extends Transport {
    * bound to a nodeId, fire onPeerDied and unbind.
    */
   handleConnClosed(connId) {
+    this._retiredConns?.delete(connId);
     const nodeId = this._nodeIdByConnId.get(connId);
     const reported = nodeId ?? connId;
     // Socket-is-bootstrap v0.5 (Aster 3d778257 RT-2): a death is fired only

@@ -196,3 +196,48 @@ export class RecentlyRetired {
   }
   stats() { return { identities: this._ids.size, conns: this._conns.size, refusedIdentity: this.refusedIdentity, refusedConn: this.refusedConn }; }
 }
+
+// ── Close a Retired Socket (2.189.0; David 2026-11-12) ───────────────────
+//
+// The route rule retires a door socket for good the moment the same identity
+// binds on a mesh channel. Until 2.189.0 the bridge then closed that socket
+// only when the client reported a mesh at or above the graduation safe floor
+// (4), so a thin client kept an OPEN socket that could carry nothing; when
+// its channel to the bridge later died it held a socket and no channel
+// (axona-docs design/client-bridge-relation-states.md, state E).
+//
+// David: "Close a retired websocket." A client on a kernel that takes a 4200
+// as a release whenever its channel to this bridge is bound (4.136.0) has its
+// retired socket closed whatever its mesh size. An older kernel would read
+// that close as a mistake and reconnect at once, so for it the floor rule
+// stands unchanged.
+
+/** The first kernel whose client keeps a 4200 release with a thin mesh. */
+export const CLOSE_RETIRED_MIN_KERNEL_DEFAULT = '4.136.0';
+
+/**
+ * Should this door socket be closed with 4200 now? Pure.
+ *   retired   the socket's route for its identity is superseded
+ *   doorBound the door channel of this connection has bound
+ *   meshBound the client's last FRESH report of its mesh size, or null
+ * A capable kernel: closed once retired (or door-bound) with a fresh report of
+ * at least one bound peer. The report is the client's own word that a channel
+ * is up on ITS side; without it a close could arrive before the client has
+ * bound and be taken for a mistake.
+ * An older kernel: the floor rule (door-bound, fresh report at or above the
+ * safe floor, kernel at or above the graduation minimum).
+ * @returns {{ close: boolean, why: string }}
+ */
+export function bootstrapSocketVerdict({ kernelVersion, retired, doorBound, meshBound, safeFloor, graduationMinKernel, closeRetiredMinKernel = CLOSE_RETIRED_MIN_KERNEL_DEFAULT }) {
+  const kv = typeof kernelVersion === 'string' && kernelVersion ? kernelVersion : '0.0.0';
+  const fresh = Number.isInteger(meshBound) && meshBound >= 0;
+  if (gteVersion(kv, closeRetiredMinKernel)) {
+    if (retired !== true && doorBound !== true) return { close: false, why: 'not-retired' };
+    if (!fresh || meshBound < 1) return { close: false, why: 'no-fresh-report' };
+    return { close: true, why: 'retired' };
+  }
+  if (doorBound !== true) return { close: false, why: 'door-unbound' };
+  if (!fresh || meshBound < safeFloor) return { close: false, why: 'below-floor' };
+  if (!gteVersion(kv, graduationMinKernel)) return { close: false, why: 'kernel-too-old' };
+  return { close: true, why: 'floor' };
+}
