@@ -38,6 +38,7 @@
 // =====================================================================
 
 import { WebSocketServer } from 'ws';
+import { bootMeshMode } from './socket_bootstrap.js';
 import crypto from 'crypto';
 import http   from 'http';
 import net    from 'node:net';
@@ -879,10 +880,16 @@ const directory = startDirectoryPublisher({
 // Bootstrap into the mesh as a node (non-fatal, background). Once the uplink
 // integrates, re-publish so this bridge's entry lands on the SHARED mesh.
 // Skipped in upstreams-only mode: the isolation gate above already owns the uplink.
-if (!UPSTREAMS_ONLY && DIRECTORY_ON && SELF_URL) {
-  bridgeNode.startUplink({ book: bridgeBook, selfUrl: SELF_URL })
+// 2.187.0: with socket-is-bootstrap on and no federation, the bridge still gets
+// a mesh (or the flag has nothing to switch a newcomer onto), and that mesh is
+// built with NO upstream and without consulting the upstream planner, whose
+// fallback seeds are the production bridges. See bootMeshMode.
+const BOOT_MESH = bootMeshMode({ upstreamsOnly: UPSTREAMS_ONLY, directoryOn: DIRECTORY_ON, selfUrl: SELF_URL, socketBootstrapOn: bridgeNode.socketBootstrapOn?.() === true });
+if (BOOT_MESH) {
+  bridgeNode.startUplink({ book: BOOT_MESH === 'federated' ? bridgeBook : null, selfUrl: SELF_URL, noUpstream: BOOT_MESH === 'mesh-only' })
     .then((upstream) => {
       if (upstream) { log('uplink-up', { upstream }); directory.republish?.('post-uplink'); }
+      else if (BOOT_MESH === 'mesh-only') { log('uplink-none', { reason: 'mesh-only: socket-is-bootstrap on, no upstream dialled or planned' }); }
       else          { log('uplink-none', { reason: 'no reachable upstream — running as seed' }); }
     })
     .catch((err) => logErr('uplink-failed', { err: err.message }));

@@ -96,6 +96,33 @@ export function assertKernelSurfaces(parts) {
   if (missing.length) throw new Error(`socket-bootstrap refused: the installed kernel lacks ${missing.join(', ')} (needs @axona/protocol ≥ ${SOCKET_BOOTSTRAP_DEFAULTS.minKernel}); unset ${SOCKET_BOOTSTRAP_ENVS.on} or upgrade the pin`);
 }
 
+/**
+ * Which mesh, if any, does this bridge start in the background at boot?
+ *   'federated' — directory on with a public URL: the uplink plans an upstream
+ *                 (env seeds, the bridge book, the built-in defaults), as always.
+ *   'mesh-only' — socket-is-bootstrap on and NOT federated: a mesh with NO
+ *                 upstream, and the upstream planner is NEVER consulted.
+ *   null        — no background mesh (the upstreams-only isolation gate owns the
+ *                 uplink when it is on; otherwise there is nothing to start).
+ *
+ * WHY 'mesh-only' EXISTS (2.187.0). Until now the background start required the
+ * directory on and a public URL, which left a SEED bridge with the directory off
+ * — testnet's first bridge — with the flag on and no mesh to switch a newcomer
+ * onto: the reserved id was never advertised and every client stayed on its
+ * WebSocket.
+ *
+ * WHY IT MUST NOT PLAN AN UPSTREAM. The planner's fallback seeds are the
+ * PRODUCTION bridges (uplink_policy.js DEFAULT_UPSTREAMS). A testnet seed with
+ * the directory off that reached the planner would join production. So this
+ * mode dials nothing, by construction, not by configuration.
+ */
+export function bootMeshMode({ upstreamsOnly, directoryOn, selfUrl, socketBootstrapOn }) {
+  if (upstreamsOnly) return null;
+  if (directoryOn === true && !!selfUrl) return 'federated';
+  if (socketBootstrapOn === true) return 'mesh-only';
+  return null;
+}
+
 /** A short random door epoch, minted once per door process start. */
 export function mintDoorEpoch(random = Math.random) {
   let s = '';

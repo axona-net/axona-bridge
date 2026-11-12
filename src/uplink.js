@@ -91,8 +91,13 @@ export function ledgerFromEnv(env = process.env) {
   return env.BRIDGE_LEDGER_ENFORCE === '1' ? { enforce: true } : null;
 }
 
-export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined, meshOnly = false }) {
-  const { upstream } = await planUplink({ env, book, selfUrl, probe, log });
+export async function buildUplink({ identity, env = process.env, book = null, selfUrl = null, log = () => {}, meshCap = undefined, meshOnly = false, noUpstream = false }) {
+  // 2.187.0: noUpstream builds the mesh with no upstream and NEVER consults the
+  // planner. It is refused without meshOnly: "no upstream and no mesh" is not an
+  // uplink, and a caller that meant the planner must not get here by a typo.
+  if (noUpstream && !meshOnly) throw new Error('buildUplink: noUpstream requires meshOnly (socket-is-bootstrap on)');
+  const { upstream } = noUpstream ? { upstream: null } : await planUplink({ env, book, selfUrl, probe, log });
+  if (noUpstream) log('plan-skipped', { reason: 'noUpstream: mesh-only boot, no seed probed' });
   if (!upstream && !meshOnly) return null;
 
   // Shape a kernel-Identity for webTransport's authenticated client hello.

@@ -303,7 +303,7 @@ export class BridgeAxonaNode {
    * @param {import('./bridge_book_store.js').BridgeBookStore|null} [o.book]
    * @param {string} [o.selfUrl]  this bridge's advertised url (excluded from seeds)
    */
-  async startUplink({ env = process.env, book = null, selfUrl = null } = {}) {
+  async startUplink({ env = process.env, book = null, selfUrl = null, noUpstream = false } = {}) {
     if (this._uplink) return this._uplink.upstream;          // idempotent
     let built = null;
     try {
@@ -312,6 +312,7 @@ export class BridgeAxonaNode {
         identity: this._identity, env, book, selfUrl,
         meshCap: this._arming.meshCap,   // bridge fill v0.8: the one resolved cap (legacy when not armed)
         meshOnly: this._sb.on,           // socket-is-bootstrap v0.5: a seed bridge gets a mesh with no upstream
+        noUpstream,                      // 2.187.0: mesh-only boot never plans an upstream (the planner's defaults are production)
         log: (event, ctx) => this._log(`uplink:${event}`, ctx),
       });
     } catch (err) {

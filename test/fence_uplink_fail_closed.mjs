@@ -143,14 +143,18 @@ ok('   envUpstreams trims and drops empties', JSON.stringify(envUpstreams({ BRID
   const exit1 = SERVER_SRC.indexOf('process.exit(1)', gate);
   const publisher = SERVER_SRC.indexOf('startDirectoryPublisher({');
   const listen = SERVER_SRC.indexOf('httpServer.listen(');
-  const background = SERVER_SRC.indexOf('if (!UPSTREAMS_ONLY && DIRECTORY_ON && SELF_URL) {');
+  // 2.187.0: the background start is decided by bootMeshMode, which is handed
+  // UPSTREAMS_ONLY and returns null for it (fence_boot_mesh_mode A1), and the
+  // block runs only on a non-null mode.
+  const background = SERVER_SRC.indexOf('const BOOT_MESH = bootMeshMode({ upstreamsOnly: UPSTREAMS_ONLY,');
+  const guarded = SERVER_SRC.indexOf('if (BOOT_MESH) {\n  bridgeNode.startUplink(');
   ok('8. server.js reads BRIDGE_UPSTREAMS_ONLY with default off', flag > 0);
   ok('   the isolation gate exists', gate > 0);
   ok('   the gate awaits the uplink and passes no book', awaited > gate && awaited < gate + 600, `gate@${gate} await@${awaited}`);
   ok('   the gate exits non-zero on failure', exit1 > gate && exit1 < publisher, `gate@${gate} exit@${exit1} publisher@${publisher}`);
   ok('   the gate runs before the directory publisher starts', gate > 0 && gate < publisher, `gate@${gate} publisher@${publisher}`);
   ok('   the gate runs before listen', gate > 0 && listen > gate, `gate@${gate} listen@${listen}`);
-  ok('   the background uplink block is skipped in this mode', background > publisher);
+  ok('   the background uplink block is skipped in this mode', background > publisher && guarded > background && guarded - background < 400, `background@${background} guarded@${guarded}`);
   ok('   no other startUplink call is unguarded',
     (SERVER_SRC.match(/bridgeNode\.startUplink\(/g) || []).length === 2,
     `count ${(SERVER_SRC.match(/bridgeNode\.startUplink\(/g) || []).length}`);
