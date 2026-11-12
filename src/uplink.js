@@ -145,7 +145,14 @@ export async function buildUplink({ identity, env = process.env, book = null, se
       identity:  uplinkIdentity,
       meshRelay: true,
       reconnect: false,
-      autoHandshake: false,
+      // 2.188.0: TRUE. The kernel's web transport wires the mesh (peer-to-peer)
+      // handshake, MeshAuth, only inside its autoHandshake branch. With false,
+      // a newcomer's WebRTC channel to this bridge opened and its hello was
+      // never answered, so no identity bound and every door channel was retired
+      // at the bind deadline (testnet 2026-11-12: six opened, none bound). There
+      // is no upstream socket on a mesh-only transport, so the bridge-socket
+      // half of the handshake has nothing to do and start() returns before it.
+      autoHandshake: true,
       meshDegree: meshDegreeFor(meshCap),
       meshPools, meshLedger,
       WebSocketImpl,

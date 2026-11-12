@@ -21,7 +21,7 @@ import { buildUplink } from '../src/uplink.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
-const EXPECTED = 13;
+const EXPECTED = 14;
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECTED) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECTED} checks`); process.exitCode = 1; } });
 
 console.log('fence_boot_mesh_mode: a mesh-only boot never plans an upstream');
@@ -57,6 +57,13 @@ const drive = async (opts) => { const logs = []; let err = null; try { await bui
   const body = uplink.slice(uplink.indexOf('export async function buildUplink('));
   const iGuard = body.indexOf('noUpstream ? { upstream: null }'), iPlan = body.indexOf('await planUplink(');
   check('E2 uplink.js: the planner call sits behind the noUpstream test', iGuard > 0 && iPlan > iGuard && iPlan - iGuard < 80, JSON.stringify({ iGuard, iPlan })); }
+
+// F (2.188.0): the mesh-only transport is built WITH the handshake, or no
+// identity can ever bind on a door channel.
+{ const uplink = readFileSync(join(HERE, '..', 'src', 'uplink.js'), 'utf8');
+  const a = uplink.indexOf('bridgeUrl: null, meshOnly: true,'), b = uplink.indexOf('WebSocketImpl', a);
+  const block = uplink.slice(a, b);
+  check('F the mesh-only transport is built with autoHandshake true', a > 0 && /\n\s*autoHandshake: true,/.test(block) && !/autoHandshake: false/.test(block), JSON.stringify({ a, len: block.length })); }
 
 console.log(`\nfence_boot_mesh_mode: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
