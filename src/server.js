@@ -736,7 +736,7 @@ function maybeCloseBootstrapSocket(connId) {
     kernelVersion: c.kernelVersion || c.peerVersion || '0.0.0',
     retired: bridgeNode.socketRetired?.(connId) === true,
     doorBound: bridgeNode.doorChannelBound?.(connId) === true,
-    meshBound: mb, safeFloor: GRADUATION_SAFE_FLOOR,
+    meshBound: mb, clientBound: c.bridgeBound, safeFloor: GRADUATION_SAFE_FLOOR,
     graduationMinKernel: GRADUATION_MIN_KERNEL, closeRetiredMinKernel: CLOSE_RETIRED_MIN_KERNEL,
   });
   if (!verdict.close) return false;
@@ -1599,6 +1599,10 @@ wss.on('connection', (ws, req) => {
         if (Number.isInteger(msg.meshBound) && msg.meshBound >= 0) {
           conn.meshBound   = msg.meshBound;
           conn.meshBoundAt = Date.now();
+          // Two-sided release (2.190.0): the client's OWN view of its channel
+          // to this bridge, from the same heartbeat as the mesh report. A
+          // boolean from kernel 4.137.0+; anything else is "did not say".
+          conn.bridgeBound = (typeof msg.bridgeBound === 'boolean') ? msg.bridgeBound : undefined;
           // Socket-is-bootstrap v0.5, rule 4: a fresh qualifying report on a
           // connection whose channel to this bridge has bound releases the socket.
           if (maybeCloseBootstrapSocket(id)) break;

@@ -228,11 +228,17 @@ export const CLOSE_RETIRED_MIN_KERNEL_DEFAULT = '4.136.0';
  * safe floor, kernel at or above the graduation minimum).
  * @returns {{ close: boolean, why: string }}
  */
-export function bootstrapSocketVerdict({ kernelVersion, retired, doorBound, meshBound, safeFloor, graduationMinKernel, closeRetiredMinKernel = CLOSE_RETIRED_MIN_KERNEL_DEFAULT }) {
+export function bootstrapSocketVerdict({ kernelVersion, retired, doorBound, meshBound, clientBound, safeFloor, graduationMinKernel, closeRetiredMinKernel = CLOSE_RETIRED_MIN_KERNEL_DEFAULT }) {
   const kv = typeof kernelVersion === 'string' && kernelVersion ? kernelVersion : '0.0.0';
   const fresh = Number.isInteger(meshBound) && meshBound >= 0;
   if (gteVersion(kv, closeRetiredMinKernel)) {
     if (retired !== true && doorBound !== true) return { close: false, why: 'not-retired' };
+    // Two-sided release (2.190.0; Orion acbffcc6 point 1). `retired` and
+    // `doorBound` are THIS bridge's belief that the channel is up. A client
+    // that lost the channel knows it first, and a client on kernel 4.137.0+
+    // says so on every ping. An explicit false withholds the close; a client
+    // that does not send the field keeps the 2.189.0 rule.
+    if (clientBound === false) return { close: false, why: 'client-unbound' };
     if (!fresh || meshBound < 1) return { close: false, why: 'no-fresh-report' };
     return { close: true, why: 'retired' };
   }

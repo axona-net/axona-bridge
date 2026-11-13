@@ -72,5 +72,38 @@ check('B6 the operator can move the minimum', v({ kernelVersion: '4.135.0', reti
   check('D4 the close still uses 4200', /c\.ws\.close\(CLOSE_GRADUATED,/.test(mc));
 }
 
+// ── E. TWO-SIDED RELEASE (2.190.0; Orion acbffcc6 point 1) ─────────────
+// The bridge's `retired` is its own belief that the channel is up. A client
+// that lost the channel says so; the bridge then keeps the socket.
+// Mutants: drop the client-unbound test → E1, E5; require an explicit true →
+// E3; apply it to the older-kernel branch → E4; node no longer marks the
+// born-superseded connection → F2.
+{ const r = v({ kernelVersion: '4.137.0', retired: true, doorBound: false, meshBound: 2, clientBound: false });
+  check('E1 retired, client says its channel to this bridge is NOT bound → not closed, why client-unbound', r.close === false && r.why === 'client-unbound', JSON.stringify(r)); }
+check('E2 retired, client says bound → close', v({ kernelVersion: '4.137.0', retired: true, doorBound: false, meshBound: 2, clientBound: true }).close === true);
+check('E3 retired, client does not say (kernel 4.136.0) → close, the 2.189.0 rule', v({ kernelVersion: '4.136.0', retired: true, doorBound: true, meshBound: 1 }).why === 'retired' && v({ kernelVersion: '4.136.0', retired: true, doorBound: true, meshBound: 1, clientBound: undefined }).close === true);
+check('E4 an older kernel\'s floor rule ignores the field', v({ kernelVersion: '4.131.0', retired: true, doorBound: true, meshBound: 4, clientBound: false }).why === 'floor');
+check('E5 door-bound alone, client says not bound → not closed', v({ kernelVersion: '4.137.0', retired: false, doorBound: true, meshBound: 3, clientBound: false }).close === false);
+check('E6 only the boolean false withholds: 0, null, "false" do not', [0, null, 'false', {}].every((c) => v({ kernelVersion: '4.137.0', retired: true, doorBound: true, meshBound: 1, clientBound: c }).close === true));
+check('E7 client-unbound does not outrank not-retired or the report tests', v({ kernelVersion: '4.137.0', retired: false, doorBound: false, meshBound: 2, clientBound: false }).why === 'not-retired');
+
+// ── F. statics for 2.190.0 ─────────────────────────────────────────────
+{
+  const srv = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  const mc = srv.slice(srv.indexOf('function maybeCloseBootstrapSocket('), srv.indexOf('// ── Embedded Axona peer'));
+  check('F1 the verdict is given the client\'s own view, and the heartbeat records only a boolean', /clientBound: c\.bridgeBound/.test(mc) && /conn\.bridgeBound = \(typeof msg\.bridgeBound === 'boolean'\) \? msg\.bridgeBound : undefined;/.test(srv));
+  const node = readFileSync(new URL('../src/bridge_axona_node.js', import.meta.url), 'utf8');
+  const ch = node.slice(node.indexOf('async _completeHandshake('), node.indexOf('async _completeHandshake(') + 1800);
+  check('F2 a born-superseded connection is marked retired by the node itself, fill armed or not', /if \(route && route\.sub !== this\._transport\) \{[\s\S]*?if \(!this\._transport\.isRetired\(connId\)\) this\._transport\.supersedePeer\(peerNodeId\);[\s\S]*?bornSuperseded\+\+/.test(ch));
+  // the mark itself, on a transport that does NOT report bound peers (no fill)
+  const t = new WebSocketTransport({ localNodeId: 1n, sendToConn: () => true, isConnOpen: () => true, log: () => {} });
+  t.bindPeer(7n, 'c1'); t.handleConnClosed('c1');
+  t.bindPeer(7n, 'c2');                                   // the reconnect's socket
+  if (!t.isRetired('c2')) t.supersedePeer(7n);
+  check('F3 without the fill, the reconnect\'s connection (not the old one) is the one retired', t.isRetired('c2') === true && t.isRetired('c1') === false && typeof t.boundPeers === 'undefined');
+  if (!t.isRetired('c2')) t.supersedePeer(7n);
+  check('F4 the mark is idempotent', t.isRetired('c2') === true);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

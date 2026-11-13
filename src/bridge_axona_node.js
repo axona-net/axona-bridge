@@ -932,6 +932,12 @@ export class BridgeAxonaNode {
     if (this._sb.on) {
       const route = this._composite?.routeOf?.(peerNodeId) ?? null;
       if (route && route.sub !== this._transport) {
+        // 2.190.0 (Orion acbffcc6 point 3): with the fill armed the composite
+        // saw the bind above and retired this connection itself. Without the
+        // fill it saw nothing (reportBound is the fill's), and a reconnect's
+        // socket was never marked retired, so the switch depended on a second
+        // flag. Mark it here; the mark is idempotent.
+        if (!this._transport.isRetired(connId)) this._transport.supersedePeer(peerNodeId);
         this._sbStats.bornSuperseded++;
         this._log('handshake-born-superseded', { connId, peerNodeId: idToHex(peerNodeId) });
         return;
