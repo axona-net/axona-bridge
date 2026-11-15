@@ -24,6 +24,17 @@
 import { Transport } from '@axona/protocol';
 import { depositDispatchCapability } from '@axona/protocol/registry/index.js';
 
+// Round-trip measurement (bridge 2.191.0; David 2026-11-15 "Wire the bridge
+// app's transport to feed the measurement"). The estimator is the kernel's
+// (transport/rtt.js, kernel 4.148.0+). A bridge running an older kernel has no
+// such file: the import fails, KernelRttEstimator stays null, and this
+// transport measures nothing (recordRtt answers false, getRtt answers null).
+let KernelRttEstimator = null;
+try { ({ RttEstimator: KernelRttEstimator } = await import('@axona/protocol/transport/rtt.js')); } catch { KernelRttEstimator = null; }
+
+/** Peers this transport keeps a round-trip estimate for. A bound past this is not measured. */
+export const RTT_PEERS_MAX = 4096;
+
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
 
@@ -38,7 +49,7 @@ export class WebSocketTransport extends Transport {
    * @param {(connId: string) => boolean} opts.isConnOpen
    * @param {(event:string, data?:object) => void} [opts.log]
    */
-  constructor({ localNodeId, sendToConn, isConnOpen, log, reportBound = false }) {
+  constructor({ localNodeId, sendToConn, isConnOpen, log, reportBound = false, rttEstimator = KernelRttEstimator }) {
     super();
     if (typeof localNodeId !== 'bigint') {
       throw new TypeError('WebSocketTransport: localNodeId must be bigint');
@@ -68,6 +79,10 @@ export class WebSocketTransport extends Transport {
     });
     this._pending     = new Map();
     this._nextId      = 1;
+    // Round-trip measurement: the estimator class (null on an older kernel)
+    // and one estimate per bound identity's CURRENT socket.
+    this._RttEstimator = (typeof rttEstimator === 'function') ? rttEstimator : null;
+    /** @type {Map<bigint, any>} */ this._rttByNodeId = new Map();
     this._peerDiedHandlers = [];
 
     // nodeId ↔ connId binding (same shape as WebRTCTransport).
@@ -126,6 +141,8 @@ export class WebSocketTransport extends Transport {
   bindPeer(nodeId, connId) {
     if (typeof nodeId !== 'bigint') throw new TypeError('nodeId must be bigint');
     if (typeof connId !== 'string') throw new TypeError('connId must be string');
+    // A new socket is a new channel instance: its estimate starts cold.
+    if (this._connIdByNodeId.get(nodeId) !== connId) this._rttByNodeId.delete(nodeId);
     this._connIdByNodeId.set(nodeId, connId);
     this._nodeIdByConnId.set(connId, nodeId);
     // Bridge fill v0.8: the bind event, when reporting (see constructor). The
@@ -142,7 +159,7 @@ export class WebSocketTransport extends Transport {
     // Only clear the forward mapping if THIS connection is still the
     // identity's current binding; an identity that re-bound on a newer
     // connection keeps that binding when the older socket closes.
-    if (nodeId !== undefined && this._connIdByNodeId.get(nodeId) === connId) this._connIdByNodeId.delete(nodeId);
+    if (nodeId !== undefined && this._connIdByNodeId.get(nodeId) === connId) { this._connIdByNodeId.delete(nodeId); this._rttByNodeId.delete(nodeId); }
     this._nodeIdByConnId.delete(connId);
   }
 
@@ -287,6 +304,34 @@ export class WebSocketTransport extends Transport {
    *  alongside the application-level Phase 2 ping; for now we surface
    *  a sentinel.  Future: thread through the actual sampled RTT. */
   getLatency(_nodeId) { return 50; }
+
+  /**
+   * Round-trip measurement (2.191.0). The bridge does not time a client
+   * socket itself: the client pings, the bridge echoes. A 4.148.0+ client
+   * carries its own measured round trip on its ping and server.js hands it
+   * here, for the connection it arrived on. A sample for a connection that is
+   * not the identity's current binding is refused. Read-only: getLatency above
+   * still answers 50 and nothing acts on the estimate.
+   */
+  recordRtt(connId, ms, now = Date.now()) {
+    if (!this._RttEstimator) return false;
+    const nodeId = this._nodeIdByConnId.get(connId);
+    if (nodeId === undefined || this._connIdByNodeId.get(nodeId) !== connId) return false;
+    let e = this._rttByNodeId.get(nodeId);
+    if (!e) {
+      if (this._rttByNodeId.size >= RTT_PEERS_MAX) return false;
+      e = new this._RttEstimator();
+      this._rttByNodeId.set(nodeId, e);
+    }
+    return e.sample(ms, { now, source: 'reported' }) === true;
+  }
+  /** The estimate for `nodeId`'s current socket, or null (never fed, unbound, or an older kernel). */
+  getRtt(nodeId) {
+    const e = this._rttByNodeId.get(nodeId);
+    return e ? e.snapshot() : null;
+  }
+  /** How many bound identities have an estimate, and whether this build can measure at all. */
+  rttStats() { return { measuring: this._RttEstimator !== null, peers: this._rttByNodeId.size }; }
 
   // ── Inbound dispatch ─────────────────────────────────────────────
 

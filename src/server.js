@@ -1096,6 +1096,8 @@ const httpServer = http.createServer((req, res) => {
         lastSeenAgoS: Math.floor((now - conn.lastSeenAt) / 1000),
         nodeId:       boundNodeId ? idToHex(boundNodeId) : null,
         inSynaptome:  boundNodeId ? synaptomeIds.has(boundNodeId) : false,
+        // Round-trip measurement (2.191.0): the client's reported round trip on this socket, smoothed; null when none.
+        rtt:          (() => { try { const r = boundNodeId ? bridgeNode.transport?.getRtt?.(boundNodeId) : null; return r ? { srtt: r.srtt, rttvar: r.rttvar, last: r.last, min: r.min, max: r.max, samples: r.samples, ageMs: r.ageMs } : null; } catch { return null; } })(),
         ip:           conn.ip,
         ua:           (conn.ua ?? '').slice(0, 80),
       });
@@ -1596,6 +1598,12 @@ wss.on('connection', (ws, req) => {
         // size on the heartbeat. Record it (with a freshness stamp) so
         // maybeGraduate() releases the best-meshed peer on evidence, not a
         // uptime guess. Ignore malformed values (old clients omit the field).
+        // Round-trip measurement (2.191.0): a 4.148.0+ client carries its own
+        // measured round trip to this bridge. Recorded for the connection it
+        // arrived on; an older client omits the field. Measurement only.
+        if (typeof msg.rtt === 'number') {
+          try { bridgeNode.transport?.recordRtt?.(id, msg.rtt); } catch { /* measurement only */ }
+        }
         if (Number.isInteger(msg.meshBound) && msg.meshBound >= 0) {
           conn.meshBound   = msg.meshBound;
           conn.meshBoundAt = Date.now();
